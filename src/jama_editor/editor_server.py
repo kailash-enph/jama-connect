@@ -30,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from jama_mcp_v2.api_client import JamaApiClient
-from jama_mcp_v2.services import services, CACHE_DIR as _SVC_CACHE_DIR
+from jama_mcp_v2.services import services, CACHE_DIR as _SVC_CACHE_DIR, REST_PORT as _REST_PORT
 
 from .editor_attachments import AttachmentManager
 from .editor_cache import EditorCache
@@ -180,7 +180,10 @@ async def _refresh_mcp_cache(entity_type: str, entity_id: int) -> None:
         logger.warning("MCP cache refresh error for %s/%d: %s", entity_type, entity_id, e)
 
 
-EDITOR_PORT_STR = str(EDITOR_PORT)
+# When mounted on the unified backend, images are proxied via REST_PORT (8765).
+# EDITOR_PORT (8766) is only used in standalone mode.
+_PROXY_PORT = _REST_PORT if os.environ.get("JAMA_REST_PORT") else EDITOR_PORT
+_PROXY_PORT_STR = str(_PROXY_PORT)
 _REWRITE_IMG_RE = re.compile(
     r'(https?://[^"\']*?/(?:rest/v1/(?:attachments|files)/(\d+)(?:/file)?|attachment/(\d+)/[^"\'\s]*))',
     re.IGNORECASE,
@@ -191,7 +194,7 @@ def _rewrite_image_urls(html: str | None) -> str:
     """Replace Jama attachment URLs in HTML with editor-backend proxy URLs."""
     if not html:
         return html or ""
-    proxy_base = f"http://localhost:{EDITOR_PORT_STR}"
+    proxy_base = f"http://localhost:{_PROXY_PORT_STR}"
     return _REWRITE_IMG_RE.sub(
         lambda m: f"{proxy_base}/api/proxy/image/{m.group(2) or m.group(3)}",
         html,
@@ -207,7 +210,7 @@ async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "jama-editor",
-        "port": EDITOR_PORT,
+        "port": _PROXY_PORT,
         "jama_url": JAMA_URL,
         "editor_db": _cache().db_path if services.editor_cache else None,
     }

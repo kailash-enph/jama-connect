@@ -1300,50 +1300,139 @@ def _remove_pid_file() -> None:
         pass
 
 
-def _check_stale_pid() -> bool:
-    """Check if a stale PID file exists. Returns True if stale process was cleaned up."""
-    pid_path = _pid_file_path()
-    if not pid_path.exists():
-        return False
-
+def _is_port_healthy(port: int, timeout: float = 3.0) -> bool:
+    """Check if the backend on the given port responds to /api/health within timeout."""
+    import urllib.request
     try:
-        old_pid = int(pid_path.read_text().strip())
-    except (ValueError, OSError):
-        pid_path.unlink(missing_ok=True)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/health")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
         return False
 
-    # Check if the process is still running
+
+def _is_port_listening(port: int) -> bool:
+    """Check if anything is listening on the port (even if not responding)."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _kill_pid(pid: int) -> None:
+    """Kill a process by PID. Best-effort, no error on failure."""
+    try:
+        if sys.platform == "win32":
+            os.kill(pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+        import time
+        time.sleep(2)
+        # Force kill if still alive
+        try:
+            os.kill(pid, signal.SIGKILL if sys.platform != "win32" else signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process is still running."""
     if sys.platform == "win32":
         import ctypes
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(0x1000, False, old_pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if handle:
             kernel32.CloseHandle(handle)
-            logger.warning("Backend already running (PID %d). Attempting to stop...", old_pid)
-            try:
-                os.kill(old_pid, signal.SIGTERM)
-                import time
-                time.sleep(2)
-            except OSError:
-                pass
-            pid_path.unlink(missing_ok=True)
             return True
+        return False
     else:
         try:
-            os.kill(old_pid, 0)  # Check if alive
-            logger.warning("Backend already running (PID %d). Attempting to stop...", old_pid)
-            os.kill(old_pid, signal.SIGTERM)
-            import time
-            time.sleep(2)
-            pid_path.unlink(missing_ok=True)
+            os.kill(pid, 0)
             return True
         except OSError:
-            pass
+            return False
 
-    # Stale PID file — process no longer exists
-    pid_path.unlink(missing_ok=True)
-    logger.info("Cleaned up stale PID file (pid=%d).", old_pid)
+
+def _check_existing_backend(port: int) -> bool:
+    """Check if a healthy backend is already running. If so, exit gracefully.
+
+    Returns True if caller should exit (healthy backend exists).
+    Returns False if caller should proceed to start.
+    Kills zombie backends (listening but not healthy).
+    """
+    pid_path = _pid_file_path()
+
+    # 1. Check if port is healthy → exit gracefully
+    if _is_port_healthy(port):
+        old_pid = "unknown"
+        if pid_path.exists():
+            try:
+                old_pid = pid_path.read_text().strip()
+            except OSError:
+                pass
+        print(f"\n  Jama backend already running and healthy on port {port} (PID {old_pid}).")
+        print("  No action needed — exiting.\n")
+        logger.info("Backend already healthy on port %d (PID %s), exiting.", port, old_pid)
+        return True
+
+    # 2. Port is listening but not healthy → zombie, kill it
+    if _is_port_listening(port):
+        logger.warning("Port %d is listening but not responding — killing zombie process.", port)
+        print(f"\n  WARNING: Port {port} is occupied by a zombie process (not responding).")
+        # Try to find PID from PID file or netstat
+        old_pid = None
+        if pid_path.exists():
+            try:
+                old_pid = int(pid_path.read_text().strip())
+            except (ValueError, OSError):
+                pass
+        if old_pid and _is_process_alive(old_pid):
+            logger.info("Killing zombie PID %d...", old_pid)
+            print(f"  Killing PID {old_pid}...")
+            _kill_pid(old_pid)
+        else:
+            # PID file doesn't match; try to find via port
+            logger.warning("PID file missing or stale; cannot auto-kill zombie on port %d.", port)
+            print(f"  Could not identify zombie PID. Manually kill the process on port {port}.")
+            print(f"    Windows: netstat -ano | findstr :{port}")
+            print(f"    Then:    taskkill /F /PID <pid>\n")
+            return True  # Can't proceed, port is blocked
+
+        # Wait for port to free up
+        import time
+        for _ in range(5):
+            if not _is_port_listening(port):
+                break
+            time.sleep(1)
+
+        if _is_port_listening(port):
+            print(f"  ERROR: Port {port} still occupied after kill. Exiting.\n")
+            return True
+
+        print("  Zombie killed. Starting fresh backend.\n")
+        pid_path.unlink(missing_ok=True)
+        return False
+
+    # 3. Port is free, but PID file may be stale → clean up
+    if pid_path.exists():
+        try:
+            old_pid = int(pid_path.read_text().strip())
+            if _is_process_alive(old_pid):
+                logger.warning("PID %d alive but port %d not listening — killing orphan.", old_pid, port)
+                _kill_pid(old_pid)
+            pid_path.unlink(missing_ok=True)
+            logger.info("Cleaned up stale PID file.")
+        except (ValueError, OSError):
+            pid_path.unlink(missing_ok=True)
+
     return False
+
+
+def _check_stale_pid() -> bool:
+    """Legacy wrapper — delegates to _check_existing_backend."""
+    return _check_existing_backend(REST_PORT)
 
 
 # ---------- Log rotation (for service mode) ----------
@@ -2703,8 +2792,10 @@ def main():
         sys.exit(1)
 
     if args.daemon:
+        # Check if a healthy backend already exists → exit gracefully
+        if _check_existing_backend(args.port):
+            sys.exit(0)
         logger.info("Starting Jama Connect (daemon mode): MCP + REST on port %d ...", args.port)
-        _check_stale_pid()
         _setup_service_logging()
         _start_daemon(args.port)
     else:
@@ -2737,16 +2828,23 @@ def _start_daemon(port: int = REST_PORT) -> None:
 
 def run_rest():
     """Entry point for REST API only (used by the viewer app)."""
+    import argparse
     import uvicorn
 
-    # Check for stale PID and clean up
-    _check_stale_pid()
+    parser = argparse.ArgumentParser(description="Jama Connect REST API")
+    parser.add_argument("--port", type=int, default=REST_PORT, help="REST API port (default: 8765)")
+    args = parser.parse_args()
+    port = args.port
+
+    # Check if a healthy backend already exists → exit gracefully
+    if _check_existing_backend(port):
+        sys.exit(0)
 
     # Setup file-based logging for service mode
     _setup_service_logging()
 
-    logger.info("Starting Jama MCP v2 REST API on port %d (localhost only)...", REST_PORT)
-    uvicorn.run(rest_app, host="127.0.0.1", port=REST_PORT, log_level="info")
+    logger.info("Starting Jama MCP v2 REST API on port %d (localhost only)...", port)
+    uvicorn.run(rest_app, host="127.0.0.1", port=port, log_level="info")
 
 
 if __name__ == "__main__":
