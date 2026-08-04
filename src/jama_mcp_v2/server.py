@@ -2688,15 +2688,51 @@ async def api_relationship_rulesets():
 # ============================================================
 
 def main():
-    """Entry point for MCP stdio transport (used by Windsurf)."""
-    logger.info("Starting Jama MCP v2 server (stdio)...")
+    """Entry point for MCP transport. With --daemon, also starts REST API."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Jama Connect MCP Server")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Also start REST API server in background (port from JAMA_REST_PORT)")
+    parser.add_argument("--port", type=int, default=REST_PORT,
+                        help="REST API port when using --daemon (default: 8765)")
+    args = parser.parse_args()
 
     if not CLIENT_ID or not CLIENT_SECRET:
         logger.error("JAMA_CLIENT_ID and JAMA_CLIENT_SECRET must be set.")
         print("\nERROR: JAMA_CLIENT_ID and JAMA_CLIENT_SECRET environment variables are required.", file=sys.stderr)
         sys.exit(1)
 
-    mcp.run(transport="stdio")
+    if args.daemon:
+        logger.info("Starting Jama Connect (daemon mode): MCP + REST on port %d ...", args.port)
+        _check_stale_pid()
+        _setup_service_logging()
+        _start_daemon(args.port)
+    else:
+        logger.info("Starting Jama MCP v2 server (stdio)...")
+        mcp.run(transport="stdio")
+
+
+def _start_daemon(port: int = REST_PORT) -> None:
+    """Run MCP stdio server + REST API in the same asyncio event loop."""
+    import threading
+    import uvicorn
+
+    # Start REST API in a background thread
+    config = uvicorn.Config(rest_app, host="127.0.0.1", port=port, log_level="info")
+    rest_server = uvicorn.Server(config)
+
+    rest_thread = threading.Thread(target=rest_server.run, daemon=True, name="jama-rest")
+    rest_thread.start()
+    logger.info("REST API thread started on port %d", port)
+
+    # Run MCP in the main thread (stdio blocks until client disconnects)
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        logger.info("MCP server exited, shutting down REST API...")
+        rest_server.should_exit = True
+        rest_thread.join(timeout=5)
+        logger.info("Daemon shutdown complete")
 
 
 def run_rest():
@@ -2717,11 +2753,16 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Jama MCP v2 Server")
     parser.add_argument("--rest-only", action="store_true", help="Run REST API only (no MCP)")
+    parser.add_argument("--daemon", action="store_true", help="Run MCP + REST API together")
     parser.add_argument("--port", type=int, default=REST_PORT, help="REST API port")
     args = parser.parse_args()
 
     if args.rest_only:
         REST_PORT = args.port
         run_rest()
+    elif args.daemon:
+        _check_stale_pid()
+        _setup_service_logging()
+        _start_daemon(args.port)
     else:
         main()

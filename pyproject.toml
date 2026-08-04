@@ -1,6 +1,6 @@
 [project]
 name = "jama-connect"
-version = "0.3.0"
+version = "0.4.0"
 description = "Jama Connect — Unified MCP backend, REST API, viewer, and VS Code extension"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,7 @@ packages = ["src/jama_mcp_v2", "src/jama_editor"]
 jama-connect = "jama_mcp_v2.server:main"
 jama-rest = "jama_mcp_v2.server:run_rest"
 jama-editor = "jama_editor.editor_server:run_editor"
+jama-post-install = "jama_mcp_v2.post_install:main"
 
 [dependency-groups]
 dev = [

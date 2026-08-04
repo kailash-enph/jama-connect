@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -14,6 +16,66 @@ from typing import Any
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+# Default URL for pre-populated Jama cache seed (SharePoint shared link)
+# Override via JAMA_CACHE_SEED_URL env var
+CACHE_SEED_URL = os.environ.get(
+    "JAMA_CACHE_SEED_URL",
+    "",  # Set after uploading to SharePoint
+)
+
+
+def download_cache_seed(dest_path: Path, url: str | None = None) -> bool:
+    """Download and decompress a gzipped cache seed to dest_path.
+
+    Returns True if successful, False on any failure (network, auth, etc.).
+    Never raises — a missing seed is not fatal.
+    """
+    seed_url = url or CACHE_SEED_URL
+    if not seed_url:
+        logger.debug("No cache seed URL configured (JAMA_CACHE_SEED_URL)")
+        return False
+
+    if dest_path.exists():
+        logger.debug("Cache already exists at %s, skipping seed download", dest_path)
+        return False
+
+    logger.info("Downloading Jama cache seed from %s ...", seed_url)
+    try:
+        import urllib.request
+        import tempfile
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Download to temp file first
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db.gz",
+                                         dir=str(dest_path.parent)) as tmp:
+            tmp_path = tmp.name
+            urllib.request.urlretrieve(seed_url, tmp_path)
+
+        # Decompress
+        gz_size = os.path.getsize(tmp_path) / (1024 * 1024)
+        logger.info("Downloaded %.1f MB, decompressing...", gz_size)
+        with gzip.open(tmp_path, "rb") as f_in:
+            with open(str(dest_path), "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+        os.unlink(tmp_path)
+        db_size = os.path.getsize(str(dest_path)) / (1024 * 1024)
+        logger.info("Cache seed installed: %.1f MB at %s", db_size, dest_path)
+        return True
+
+    except Exception as exc:
+        logger.warning("Failed to download cache seed: %s", exc)
+        # Clean up partial downloads
+        if dest_path.exists():
+            dest_path.unlink(missing_ok=True)
+        try:
+            if 'tmp_path' in locals():
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+        return False
 
 
 def _extract_parent_id(parent: Any) -> int | None:
@@ -255,6 +317,9 @@ class JamaCache:
 
     async def open(self) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        # Try to seed cache on first run
+        if not self._db_path.exists():
+            download_cache_seed(self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
