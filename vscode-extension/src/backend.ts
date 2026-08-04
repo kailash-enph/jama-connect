@@ -50,22 +50,27 @@ export class BackendManager implements vscode.Disposable {
     const cfg = getConfig();
     const port = cfg.port;
 
-    // Check if a backend is already running on the port
+    // Check if a backend is already running on the port (with timeout)
     this.apiClient = new ApiClient(`http://localhost:${port}`);
-    if (await this.apiClient.healthCheck()) {
-      this.outputChannel.appendLine(
-        `[backend] Backend already running on port ${port}.`
-      );
-      this._isRunning = true;
-      this.updateStatus("running");
-      this.startHealthCheck();
-      return true;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`http://localhost:${port}/api/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        this.outputChannel.appendLine(
+          `[backend] Backend already running on port ${port}.`
+        );
+        this._isRunning = true;
+        this.updateStatus("running");
+        this.startHealthCheck();
+        return true;
+      }
+    } catch {
+      // Not running or hung — proceed to start
     }
 
     this.updateStatus("starting");
-    this.outputChannel.appendLine(
-      `[backend] Starting unified backend on port ${port} from ${cfg.backendPath}...`
-    );
 
     // Build environment — credentials are stored in OS keyring via Settings API,
     // no need to inject them as env vars. The backend reads them from keyring on startup.
@@ -75,12 +80,24 @@ export class BackendManager implements vscode.Disposable {
       JAMA_REST_PORT: String(port),
     };
 
+    // Prefer pip-installed 'jama-rest' command, fall back to uv run
+    const useJamaRest = this.commandExists("jama-rest");
+    const cmd = useJamaRest ? "jama-rest" : cfg.uvPath;
+    const args = useJamaRest
+      ? ["--port", String(port)]
+      : ["run", "--link-mode=copy", "python", "-m", "jama_mcp_v2", "--rest-only", "--port", String(port)];
+    const cwd = useJamaRest ? undefined : cfg.backendPath;
+
+    this.outputChannel.appendLine(
+      `[backend] Starting: ${cmd} ${args.join(" ")}${cwd ? ` (cwd: ${cwd})` : ""}`
+    );
+
     try {
       this.process = spawn(
-        cfg.uvPath,
-        ["run", "--link-mode=copy", "python", "-m", "jama_mcp_v2", "--rest-only", "--port", String(port)],
+        cmd,
+        args,
         {
-          cwd: cfg.backendPath,
+          cwd,
           env,
           stdio: ["ignore", "pipe", "pipe"],
           shell: true,
@@ -193,6 +210,19 @@ export class BackendManager implements vscode.Disposable {
   }
 
   // ---------- Private ----------
+
+  private commandExists(cmd: string): boolean {
+    try {
+      if (process.platform === "win32") {
+        execSync(`where ${cmd}`, { encoding: "utf-8", windowsHide: true, stdio: "pipe" });
+      } else {
+        execSync(`which ${cmd}`, { encoding: "utf-8", stdio: "pipe" });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   private async waitForReady(port: number, timeoutMs: number): Promise<boolean> {
     const start = Date.now();
