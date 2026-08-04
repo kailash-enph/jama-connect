@@ -112,14 +112,14 @@ export class BackendManager implements vscode.Disposable {
         this.outputChannel.append(data.toString());
       });
 
-      this.process.on("error", (err) => {
+      this.process.on("error", (err: Error) => {
         this.outputChannel.appendLine(`[backend] Process error: ${err.message}`);
         this._isRunning = false;
         this.process = null;
         this.updateStatus("error");
       });
 
-      this.process.on("exit", (code, signal) => {
+      this.process.on("exit", (code: number | null, signal: string | null) => {
         this.outputChannel.appendLine(
           `[backend] Process exited (code=${code}, signal=${signal})`
         );
