@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Override via JAMA_CACHE_SEED_URL env var
 CACHE_SEED_URL = os.environ.get(
     "JAMA_CACHE_SEED_URL",
-    "",  # Set after uploading to SharePoint
+    "https://enphase.sharepoint.com/:u:/r/sites/MBUIndiaSystemsEngineering/Shared%20Documents/ToShare/Jama/cache_seed.db.gz?d=w119688a2123f441585f0e424df4ded95&csf=1&web=1&e=2a06kj&download=1",
 )
 
 
