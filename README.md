@@ -99,16 +99,38 @@ This gives you instant access to 91 projects and 8500+ items without a full sync
 }
 ```
 
+## Credential Auto-Loading
+
+All commands (`jama-connect`, `jama-rest`, `jama-editor`) **automatically find credentials** from your IDE's MCP config — no need to set env vars manually.
+
+Searched in order (first match wins):
+
+| IDE | Config path |
+|---|---|
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| Devin | `~/AppData/Roaming/devin/mcp_config.json` |
+| Claude Desktop | `~/.config/claude/mcp_config.json` |
+| Cursor | `~/.cursor/mcp.json` |
+
+Looks for a `jama-mcp-v2`, `jama-connect`, or `jama` entry and reads the `env` block.
+
+If no config is found, set env vars directly:
+```bash
+set JAMA_CLIENT_ID=your-client-id
+set JAMA_CLIENT_SECRET=your-client-secret
+```
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `JAMA_URL` | `https://enphase.jamacloud.com` | Jama instance URL |
-| `JAMA_CLIENT_ID` | required | OAuth2 client ID |
-| `JAMA_CLIENT_SECRET` | required | OAuth2 client secret |
+| `JAMA_CLIENT_ID` | auto from mcp_config | OAuth2 client ID |
+| `JAMA_CLIENT_SECRET` | auto from mcp_config | OAuth2 client secret |
 | `JAMA_CACHE_DIR` | `~/.jama-mcp-v2` | Cache directory |
 | `JAMA_REST_PORT` | `8765` | REST API port |
 | `JAMA_MAX_CONCURRENT` | `10` | Jama API concurrency limit |
+| `JAMA_CACHE_SEED_URL` | SharePoint link | Override cache seed download URL |
 
 ## Development
 

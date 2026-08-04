@@ -61,14 +61,16 @@ jama-rest
 
 Open http://localhost:8765/viewer
 
+Credentials are **auto-loaded** from your `mcp_config.json` — no env vars needed.
+
 ### VS Code Extension
 
-```bash
-jama-editor          # installs the bundled VSIX
-```
+The editor backend is built into `jama-rest` and `jama-connect --daemon`.
 
-Open VS Code → click the **Jama Editor** icon in the activity bar.
-Requires `jama-rest` or `jama-connect --daemon` running on port 8765.
+1. Start the backend: `jama-rest` or `jama-connect --daemon`
+2. Open VS Code → click the **Jama Editor** icon in the activity bar
+
+The `jama-editor` command installs the VSIX to VS Code (only needed once).
 
 ## All Commands
 
@@ -89,7 +91,8 @@ The VS Code extension needs the REST backend running.
 - Or run `jama-rest` in a terminal
 
 ### 401 Unauthorized
-Check `JAMA_CLIENT_ID` and `JAMA_CLIENT_SECRET` in your config.
+Credentials are auto-loaded from `mcp_config.json` (Windsurf, Devin, Claude, Cursor).
+If no config exists, set env vars: `set JAMA_CLIENT_ID=... && set JAMA_CLIENT_SECRET=...`
 
 ### Port 8765 already in use
 Another instance is running. Kill it:
