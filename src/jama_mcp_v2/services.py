@@ -50,6 +50,52 @@ except ImportError:
                     if _k.strip() not in os.environ:
                         os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
 
+# ---------- Auto-load credentials from mcp_config.json if env vars are missing ----------
+
+def _load_credentials_from_mcp_config() -> None:
+    """Fall back to mcp_config.json for JAMA_CLIENT_ID / JAMA_CLIENT_SECRET.
+
+    Searches known config file locations:
+      - Windsurf:  ~/.codeium/windsurf/mcp_config.json
+      - Devin:     ~/AppData/Roaming/devin/mcp_config.json  (Windows)
+      - Claude:    ~/.config/claude/mcp_config.json
+    Loads env vars from the first 'jama-mcp-v2' or 'jama-connect' entry found.
+    """
+    if os.environ.get("JAMA_CLIENT_ID") and os.environ.get("JAMA_CLIENT_SECRET"):
+        return  # Already set, nothing to do
+
+    import json
+    from pathlib import Path
+
+    home = Path.home()
+    candidates = [
+        home / ".codeium" / "windsurf" / "mcp_config.json",
+        home / "AppData" / "Roaming" / "devin" / "mcp_config.json",
+        home / ".config" / "claude" / "mcp_config.json",
+        home / ".cursor" / "mcp.json",
+    ]
+
+    for config_path in candidates:
+        if not config_path.exists():
+            continue
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            servers = data.get("mcpServers", data)
+            for key in ("jama-mcp-v2", "jama-connect", "jama"):
+                entry = servers.get(key, {})
+                env = entry.get("env", {})
+                if env.get("JAMA_CLIENT_ID") and env.get("JAMA_CLIENT_SECRET"):
+                    for k, v in env.items():
+                        if k not in os.environ:
+                            os.environ[k] = v
+                    logger.info("Loaded Jama credentials from %s [%s]", config_path, key)
+                    return
+        except Exception:
+            continue
+
+
+_load_credentials_from_mcp_config()
+
 # ---------- Settings from env ----------
 
 JAMA_URL = os.environ.get("JAMA_URL", "https://enphase.jamacloud.com")

@@ -1156,12 +1156,29 @@ def run_editor() -> None:
 
     Creates a lifespan-enabled wrapper around editor_app so that
     services are initialized/shutdown properly when running standalone.
+
+    Credentials are auto-loaded from mcp_config.json if env vars are not set.
     """
     import uvicorn
 
+    if not CLIENT_ID or not CLIENT_SECRET:
+        print()
+        print("ERROR: Jama credentials not found.")
+        print()
+        print("Credentials are auto-loaded from mcp_config.json (Windsurf/Devin/Claude).")
+        print("If none of those exist, set env vars:")
+        print("  set JAMA_CLIENT_ID=<your-client-id>")
+        print("  set JAMA_CLIENT_SECRET=<your-client-secret>")
+        print()
+        print("Or use the unified backend (recommended):")
+        print("  jama-rest              # REST API + editor + viewer")
+        print("  jama-connect --daemon  # MCP + REST API + editor")
+        print()
+        sys.exit(1)
+
     standalone_app = FastAPI(
         title="Jama Editor Backend (standalone)",
-        version="0.2.0",
+        version="0.4.0",
         lifespan=_standalone_lifespan,
     )
     standalone_app.mount("/", editor_app)
