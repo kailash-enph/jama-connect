@@ -17,64 +17,128 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-# Default URL for pre-populated Jama cache seed (SharePoint shared link)
-# Override via JAMA_CACHE_SEED_URL env var
-CACHE_SEED_URL = os.environ.get(
-    "JAMA_CACHE_SEED_URL",
-    "https://enphase.sharepoint.com/:u:/r/sites/MBUIndiaSystemsEngineering/Shared%20Documents/ToShare/Jama/cache_seed.db.gz?d=w119688a2123f441585f0e424df4ded95&csf=1&web=1&e=2a06kj&download=1",
+# SharePoint URL for pre-populated Jama cache seed
+# Requires Enphase SSO — cannot be downloaded anonymously by urllib
+CACHE_SEED_URL = (
+    "https://enphase.sharepoint.com/:u:/r/sites/MBUIndiaSystemsEngineering/"
+    "Shared%20Documents/ToShare/Jama/cache_seed.db.gz"
+    "?d=w119688a2123f441585f0e424df4ded95&csf=1&web=1&e=2a06kj"
 )
 
 
-def download_cache_seed(dest_path: Path, url: str | None = None) -> bool:
-    """Download and decompress a gzipped cache seed to dest_path.
+def init_cache_seed(dest_path: Path) -> bool:
+    """Check for cache seed and install it on first run.
 
-    Returns True if successful, False on any failure (network, auth, etc.).
-    Never raises — a missing seed is not fatal.
+    1. If cache.db already exists → skip
+    2. Check for cache_seed.db.gz in Downloads, ~/.jama-connect/, or temp/
+    3. If not found, open browser to SharePoint link and wait for download
+    4. Decompress and install
+
+    Returns True if a seed was installed, False otherwise.
     """
-    seed_url = url or CACHE_SEED_URL
-    if not seed_url:
-        logger.debug("No cache seed URL configured (JAMA_CACHE_SEED_URL)")
-        return False
-
     if dest_path.exists():
-        logger.debug("Cache already exists at %s, skipping seed download", dest_path)
         return False
 
-    logger.info("Downloading Jama cache seed from %s ...", seed_url)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Search common locations for a pre-downloaded seed
+    search_paths = _find_seed_file()
+    if search_paths:
+        return _install_seed(search_paths, dest_path)
+
+    # No seed found — prompt user
+    print("\n" + "=" * 60)
+    print("  JAMA CACHE SEED — First-Run Setup")
+    print("=" * 60)
+    print()
+    print("  No local Jama cache found. A pre-populated cache")
+    print("  (91 projects, 8500+ items) is available on SharePoint.")
+    print()
+    print("  1. Download cache_seed.db.gz from:")
+    print(f"     {CACHE_SEED_URL}")
+    print()
+    print("  2. Place it in one of these locations:")
+    print(f"     - {dest_path.parent}")
+    if os.name == "nt":
+        downloads = Path(os.environ.get("USERPROFILE", "~")) / "Downloads"
+    else:
+        downloads = Path.home() / "Downloads"
+    print(f"     - {downloads}")
+    print()
+
+    # Try to open browser
     try:
-        import urllib.request
-        import tempfile
+        import webbrowser
+        webbrowser.open(CACHE_SEED_URL)
+        print("  (Browser opened to SharePoint link)")
+    except Exception:
+        pass
 
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+    print()
+    input("  Press ENTER after downloading (or ENTER to skip): ")
 
-        # Download to temp file first
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db.gz",
-                                         dir=str(dest_path.parent)) as tmp:
-            tmp_path = tmp.name
-            urllib.request.urlretrieve(seed_url, tmp_path)
+    # Check again after user downloads
+    search_paths = _find_seed_file()
+    if search_paths:
+        return _install_seed(search_paths, dest_path)
 
-        # Decompress
-        gz_size = os.path.getsize(tmp_path) / (1024 * 1024)
-        logger.info("Downloaded %.1f MB, decompressing...", gz_size)
-        with gzip.open(tmp_path, "rb") as f_in:
+    print("  No seed file found. Starting with empty cache.")
+    print("  Run 'jama_sync_project' to populate from Jama API.")
+    print()
+    return False
+
+
+def _find_seed_file() -> Path | None:
+    """Search common locations for cache_seed.db.gz."""
+    candidates = []
+
+    # User home / .jama-connect
+    home = Path(os.path.expanduser("~"))
+    candidates.append(home / ".jama-connect" / "cache_seed.db.gz")
+
+    # Downloads folder
+    if os.name == "nt":
+        downloads = Path(os.environ.get("USERPROFILE", "~")) / "Downloads"
+    else:
+        downloads = Path.home() / "Downloads"
+    candidates.append(downloads / "cache_seed.db.gz")
+
+    # Current directory
+    candidates.append(Path.cwd() / "cache_seed.db.gz")
+
+    # Temp directory
+    import tempfile
+    candidates.append(Path(tempfile.gettempdir()) / "cache_seed.db.gz")
+
+    for p in candidates:
+        if p.exists():
+            logger.info("Found cache seed: %s", p)
+            return p
+
+    return None
+
+
+def _install_seed(gz_path: Path, dest_path: Path) -> bool:
+    """Decompress a gzipped cache seed to dest_path."""
+    try:
+        gz_size = gz_path.stat().st_size / (1024 * 1024)
+        logger.info("Installing cache seed from %s (%.1f MB compressed)...", gz_path, gz_size)
+        print(f"  Installing cache seed from {gz_path} ...")
+
+        with gzip.open(str(gz_path), "rb") as f_in:
             with open(str(dest_path), "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out)
 
-        os.unlink(tmp_path)
-        db_size = os.path.getsize(str(dest_path)) / (1024 * 1024)
+        db_size = dest_path.stat().st_size / (1024 * 1024)
         logger.info("Cache seed installed: %.1f MB at %s", db_size, dest_path)
+        print(f"  Cache seed installed: {db_size:.0f} MB ({dest_path})")
         return True
 
     except Exception as exc:
-        logger.warning("Failed to download cache seed: %s", exc)
-        # Clean up partial downloads
+        logger.warning("Failed to install cache seed: %s", exc)
+        print(f"  WARNING: Failed to install cache seed: {exc}")
         if dest_path.exists():
             dest_path.unlink(missing_ok=True)
-        try:
-            if 'tmp_path' in locals():
-                os.unlink(tmp_path)
-        except OSError:
-            pass
         return False
 
 
@@ -319,7 +383,7 @@ class JamaCache:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         # Try to seed cache on first run
         if not self._db_path.exists():
-            download_cache_seed(self._db_path)
+            init_cache_seed(self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
