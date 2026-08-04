@@ -2,186 +2,125 @@
 
 ## What is jama-connect?
 
-A unified pip package that bundles:
-- **MCP Server** — Jama integration for Windsurf/Claude IDE
-- **REST API** — Standalone web server with Jama viewer
-- **VS Code Extension** — Rich-text editor for Jama items
+One pip package that gives you:
+- **MCP Server** — Jama integration for Windsurf/Devin (stdio)
+- **REST API** — FastAPI web server with Jama viewer (port 8765)
+- **VS Code Extension** — rich-text editor for Jama items
+- **Daemon Mode** — MCP + REST in a single process
+- **Cache Seed** — pre-populated Enphase data on first run
 
-## Installation
-
-### From Source (Development)
-
-```bash
-cd tools/jama-connect
-
-# Install dependencies
-uv sync
-
-# Build the package (viewer + extension + wheel)
-.\build-package.ps1
-
-# Install locally
-pip install -e .
-```
-
-### From Wheel
+## Install
 
 ```bash
-pip install dist/jama-connect-0.3.0-py3-none-any.whl
+pip install jama-connect
+
+# Create symlink for Devin
+jama-post-install
 ```
+
+## First Run — Cache Seed
+
+On first run, if no `~/.jama-connect/cache.db` exists:
+
+1. jama-connect checks `~/Downloads/` for `cache_seed.db.gz`
+2. If not found, opens your browser to the SharePoint download link
+3. Download the file (44 MB), press ENTER
+4. Seed is auto-decompressed → 321 MB cache with 91 projects, 8500+ items
+
+After seeding, you have instant access — no full sync needed.
 
 ## Usage
 
-### 1. MCP Server (for Windsurf)
+### For Windsurf/Devin (recommended)
 
-Update your `mcp_config.json`:
+Add to `mcp_config.json`:
 
 ```json
 {
-  "jama-connect": {
+  "jama-mcp-v2": {
     "command": "jama-connect",
+    "args": ["--daemon"],
     "env": {
       "JAMA_URL": "https://enphase.jamacloud.com",
       "JAMA_CLIENT_ID": "your-client-id",
       "JAMA_CLIENT_SECRET": "your-client-secret",
-      "JAMA_CACHE_DIR": "~/.jama-connect"
+      "JAMA_CACHE_DIR": "~/.jama-connect",
+      "JAMA_REST_PORT": "8765"
     }
   }
 }
 ```
 
-Then use `mcp6_*` tools in Windsurf.
+`--daemon` starts both MCP and REST API in one process. No separate terminal needed.
 
-### 2. REST API + Viewer
+### Browse Jama in Browser
 
 ```bash
 jama-rest
 ```
 
-Open http://localhost:8765/viewer in your browser.
+Open http://localhost:8765/viewer
 
-### 3. VS Code Extension
-
-```bash
-jama-editor
-```
-
-This installs the bundled extension to VS Code.
-
-## Building
-
-### Full Build (All Components)
-```bash
-.\build-package.ps1
-```
-
-### Build Only Viewer
-```bash
-.\build-package.ps1 -SkipExtension -SkipWheel
-```
-
-### Build Only Extension
-```bash
-.\build-package.ps1 -SkipViewer -SkipWheel
-```
-
-### Build Only Wheel
-```bash
-.\build-package.ps1 -SkipViewer -SkipExtension
-```
-
-## Testing
+### VS Code Extension
 
 ```bash
-# Python tests
-uv run pytest tests/ -v
-
-# TypeScript tests (extension)
-cd vscode-extension
-npm run test
+jama-editor          # installs the bundled VSIX
 ```
 
-## Publishing
+Open VS Code → click the **Jama Editor** icon in the activity bar.
+Requires `jama-rest` or `jama-connect --daemon` running on port 8765.
 
-### To Internal PyPI
-```bash
-uv build
-twine upload --repository-url http://nz-lnx-01/pypi dist/*
-```
+## All Commands
 
-### To VS Code Marketplace (Future)
-```bash
-cd vscode-extension
-vsce publish
-```
+| Command | Purpose |
+|---|---|
+| `jama-connect` | MCP server only (stdio) |
+| `jama-connect --daemon` | MCP + REST API in one process |
+| `jama-rest` | REST API + viewer standalone |
+| `jama-editor` | Install VS Code extension |
+| `jama-post-install` | Create Devin symlink |
+| `jama-post-install --check` | Verify symlink exists |
 
 ## Troubleshooting
 
-### Extension Installation Fails
-```
-ERROR: VS Code CLI not found
-```
+### Jama Editor sidebar is empty
+The VS Code extension needs the REST backend running.
+- Use `jama-connect --daemon` (if using Devin)
+- Or run `jama-rest` in a terminal
 
-**Solution:** Ensure VS Code is installed and `code` is in your PATH.
+### 401 Unauthorized
+Check `JAMA_CLIENT_ID` and `JAMA_CLIENT_SECRET` in your config.
 
-On Windows, add to PATH:
-```
-C:\Users\<username>\AppData\Local\Programs\Microsoft VS Code\bin
-```
-
-### MCP Server Not Connecting
-```
-ERROR: 401 Unauthorized
-```
-
-**Solution:** Check your Jama credentials in `mcp_config.json`:
-- `JAMA_CLIENT_ID` and `JAMA_CLIENT_SECRET` must be valid
-- Ensure you're using the correct `JAMA_URL`
-
-### Viewer Not Loading
-```
-ERROR: Connection refused on localhost:8765
-```
-
-**Solution:** Ensure the REST API is running:
+### Port 8765 already in use
+Another instance is running. Kill it:
 ```bash
-jama-rest
+# Windows
+taskkill /F /IM jama-connect.exe
+# Linux/macOS
+pkill -f jama-connect
 ```
 
-## Directory Structure
+### Symlink creation fails on Windows
+Requires Developer Mode or admin privileges. `jama-post-install` falls back to Windows junction (no admin needed).
 
-```
-tools/jama-connect/
-├── src/                      # Python source code
-│   ├── jama_mcp_v2/         # MCP backend + REST API
-│   └── jama_editor/         # Editor backend
-├── viewer/                  # Next.js viewer app
-├── vscode-extension/        # VS Code extension
-├── scripts/                 # Installation scripts
-├── tests/                   # Python tests
-├── pyproject.toml          # Package metadata
-├── build-package.ps1       # Build script
-└── README.md               # Full documentation
-```
+## Files
+
+| Location | Purpose |
+|---|---|
+| `~/.jama-connect/cache.db` | Jama item/test cache (321 MB with seed) |
+| `~/.jama-connect/editor_db.sqlite` | Editor drafts and schema |
+| `~/.jama-connect/logs/` | Service logs |
+| `~/.devin/mcp-servers/jama-connect` | Devin symlink/junction |
 
 ## Documentation
 
-- **PACKAGE_STRUCTURE.md** — Detailed package layout and architecture
-- **VSCODE_EXTENSION_BUNDLING.md** — How the extension is bundled and installed
-- **ARCHITECTURE.md** — Technical architecture and data flow
-- **README.md** — User documentation
-
-## Next Steps
-
-1. **Build the package:** `.\build-package.ps1`
-2. **Install locally:** `pip install -e .`
-3. **Test MCP:** Update `mcp_config.json` and restart Windsurf
-4. **Test REST API:** Run `jama-rest` and open http://localhost:8765/viewer
-5. **Test Extension:** Run `jama-editor` to install to VS Code
+- **README.md** — Full documentation and architecture
+- **ARCHITECTURE.md** — Data flow diagrams, image proxy, push flow
+- **PACKAGE_STRUCTURE.md** — Source tree and build layout
+- **VSCODE_EXTENSION_BUNDLING.md** — How the extension is bundled
 
 ## Support
 
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review the detailed documentation in the repo
-3. Check logs in `~/.jama-connect/`
+1. Check logs in `~/.jama-connect/logs/`
+2. Review [README.md](README.md) for detailed architecture
+3. File issues at [github.com/kailash-enph/jama-connect](https://github.com/kailash-enph/jama-connect/issues)
