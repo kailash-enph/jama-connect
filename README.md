@@ -2,7 +2,7 @@
 
 Unified Jama Connect package — MCP server + REST API + web viewer + VS Code extension.
 
-**Version:** 0.4.0 | **Repo:** [github.com/kailash-enph/jama-connect](https://github.com/kailash-enph/jama-connect)
+**Version:** 0.5.0 | **Repo:** [github.com/kailash-enph/jama-connect](https://github.com/kailash-enph/jama-connect)
 
 ## Features
 
@@ -24,7 +24,7 @@ pip install jama-connect
 
 Or from wheel:
 ```bash
-pip install dist/jama_connect-0.4.0-py3-none-any.whl
+pip install dist/jama_connect-0.5.0-py3-none-any.whl
 ```
 
 ### Post-Install
@@ -73,9 +73,9 @@ Then open VS Code → Jama Editor sidebar. Requires `jama-rest` or `jama-connect
 
 ## First-Run Cache Seed
 
-On first run (no `~/.jama-connect/cache.db` exists), jama-connect will:
+On first run (no `~/.jama-mcp-v2/projects/<id>.db` exists), jama-connect will:
 
-1. Check `~/Downloads/`, `~/.jama-connect/`, cwd, and system temp for `cache_seed.db.gz`
+1. Check `~/Downloads/`, `~/.jama-mcp-v2/`, cwd, and system temp for `cache_seed.db.gz`
 2. If not found, open the SharePoint link in your browser and wait for you to download
 3. After download, auto-find and decompress (44 MB → 321 MB)
 
@@ -87,12 +87,12 @@ This gives you instant access to 91 projects and 8500+ items without a full sync
 {
   "jama-mcp-v2": {
     "command": "jama-connect",
-    "args": ["--daemon"],
+    "args": [],
     "env": {
       "JAMA_URL": "https://enphase.jamacloud.com",
       "JAMA_CLIENT_ID": "your-client-id",
       "JAMA_CLIENT_SECRET": "your-client-secret",
-      "JAMA_CACHE_DIR": "~/.jama-connect",
+      "JAMA_CACHE_DIR": "~/.jama-mcp-v2",
       "JAMA_REST_PORT": "8765"
     }
   }
@@ -130,7 +130,7 @@ set JAMA_CLIENT_SECRET=your-client-secret
 | `JAMA_CACHE_DIR` | `~/.jama-mcp-v2` | Cache directory |
 | `JAMA_REST_PORT` | `8765` | REST API port |
 | `JAMA_MAX_CONCURRENT` | `10` | Jama API concurrency limit |
-| `JAMA_CACHE_SEED_URL` | SharePoint link | Override cache seed download URL |
+| `JAMA_CACHE_SERVER_URL` | _(unset)_ | LAN cache server URL (e.g. `http://SERVER:8866`) |
 
 ## Development
 
@@ -195,7 +195,7 @@ Daemon mode: MCP stdio (main thread) + REST API (background thread)
 
 | Location | Purpose |
 |---|---|
-| `~/.jama-connect/cache.db` | Jama item/test cache |
-| `~/.jama-connect/editor_db.sqlite` | Editor drafts/schema |
-| `~/.jama-connect/logs/` | Service logs |
+| `~/.jama-mcp-v2/projects/<id>.db` | Jama item/test cache |
+| `~/.jama-mcp-v2/editor_db.sqlite` | Editor drafts/schema |
+| `~/.jama-mcp-v2/logs/` | Service logs |
 | `~/.devin/mcp-servers/jama-connect` | Devin symlink/junction |

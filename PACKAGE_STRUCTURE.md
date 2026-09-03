@@ -183,7 +183,7 @@ Add to your Windsurf `mcp_config.json`:
       "JAMA_URL": "https://enphase.jamacloud.com",
       "JAMA_CLIENT_ID": "...",
       "JAMA_CLIENT_SECRET": "...",
-      "JAMA_CACHE_DIR": "~/.jama-connect",
+      "JAMA_CACHE_DIR": "~/.jama-mcp-v2",
       "JAMA_REST_PORT": "8765"
     }
   }
@@ -200,7 +200,7 @@ Or if installed via pip:
       "JAMA_URL": "https://enphase.jamacloud.com",
       "JAMA_CLIENT_ID": "...",
       "JAMA_CLIENT_SECRET": "...",
-      "JAMA_CACHE_DIR": "~/.jama-connect",
+      "JAMA_CACHE_DIR": "~/.jama-mcp-v2",
       "JAMA_REST_PORT": "8765"
     }
   }

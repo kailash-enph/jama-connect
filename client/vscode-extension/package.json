@@ -1,0 +1,290 @@
+{
+  "name": "jama-editor",
+  "displayName": "Jama Editor",
+  "description": "Edit Jama Connect items directly in VS Code with rich-text editing, workflow transitions, and full traceability.",
+  "version": "0.1.0",
+  "publisher": "enphase",
+  "icon": "media/jama-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enphase/enphase-windsurf-bundle.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "jama-editor",
+          "title": "Jama Editor",
+          "icon": "media/jama-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "jama-editor": [
+        {
+          "id": "jamaProjects",
+          "name": "Projects & Items",
+          "icon": "media/jama-icon.svg"
+        },
+        {
+          "id": "jamaTestRunner",
+          "name": "Test Plans & Runs",
+          "icon": "media/jama-icon.svg"
+        },
+        {
+          "id": "jamaSettingsView",
+          "name": "Settings & Status",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "jamaEditor.refreshTree",
+        "title": "Refresh",
+        "icon": "$(refresh)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.openItem",
+        "title": "Open Item",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.openTestDetail",
+        "title": "Open Test Detail",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.createItem",
+        "title": "New Child Item",
+        "icon": "$(add)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.startBackend",
+        "title": "Start Backend",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.stopBackend",
+        "title": "Stop Backend",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.searchItems",
+        "title": "Search Items...",
+        "icon": "$(search)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.openSettings",
+        "title": "Open Settings Panel",
+        "icon": "$(gear)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.clearAttachmentCache",
+        "title": "Clear Attachment Cache",
+        "icon": "$(trash)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.setSessionCookie",
+        "title": "Set SAML Session Cookie (for Images)",
+        "icon": "$(key)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.uploadAttachment",
+        "title": "Upload Attachment to Item",
+        "icon": "$(cloud-upload)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.selectProject",
+        "title": "Select Project",
+        "icon": "$(list-selection)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.refreshTestRunner",
+        "title": "Refresh Tests",
+        "icon": "$(refresh)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.syncProject",
+        "title": "Sync Project (Full)",
+        "icon": "$(cloud-download)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.incrementalSync",
+        "title": "Sync Project (Incremental)",
+        "icon": "$(sync)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.prefetchImages",
+        "title": "Prefetch All Images",
+        "icon": "$(file-media)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.sessionStatus",
+        "title": "Show Session & Image Status",
+        "icon": "$(info)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.clearImageCache",
+        "title": "Clear Image Cache",
+        "icon": "$(trash)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.manageProjectDbs",
+        "title": "Manage Project Databases",
+        "icon": "$(database)",
+        "category": "Jama"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "jamaEditor.selectProject",
+          "when": "view == jamaProjects",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jamaEditor.refreshTree",
+          "when": "view == jamaProjects",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jamaEditor.searchItems",
+          "when": "view == jamaProjects",
+          "group": "navigation@3"
+        },
+        {
+          "command": "jamaEditor.selectProject",
+          "when": "view == jamaTestRunner",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jamaEditor.refreshTestRunner",
+          "when": "view == jamaTestRunner",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "jamaEditor.openItem",
+          "when": "view == jamaProjects && viewItem == jamaItem",
+          "group": "inline"
+        },
+        {
+          "command": "jamaEditor.syncProject",
+          "when": "view == jamaProjects && viewItem == jamaProject",
+          "group": "1_actions"
+        },
+        {
+          "command": "jamaEditor.createItem",
+          "when": "view == jamaProjects && viewItem =~ /^jama(Item|Folder)$/",
+          "group": "2_modify"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Jama Editor",
+      "properties": {
+        "jamaEditor.backendPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the jama-mcp-v2 Python project directory. If empty, auto-detected from extension location."
+        },
+        "jamaEditor.port": {
+          "type": "number",
+          "default": 8765,
+          "description": "Port for the MCP REST API backend."
+        },
+        "jamaEditor.editorPort": {
+          "type": "number",
+          "default": 8766,
+          "description": "[DEPRECATED] Editor routes now served at /editor/ on main port. This setting is ignored.",
+          "deprecationMessage": "Editor backend is now unified with MCP backend. Editor routes are at /editor/ on the main port."
+        },
+        "jamaEditor.jamaUrl": {
+          "type": "string",
+          "default": "https://enphase.jamacloud.com",
+          "description": "Jama Connect instance URL."
+        },
+        "jamaEditor.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Python backend on extension activation."
+        },
+        "jamaEditor.uvPath": {
+          "type": "string",
+          "default": "uv",
+          "description": "Path to the uv executable (Python package manager)."
+        },
+        "jamaEditor.clientId": {
+          "type": "string",
+          "default": "",
+          "description": "[DEPRECATED] Use Settings panel to configure credentials (stored in OS keyring).",
+          "deprecationMessage": "Credentials are now managed via the Jama Settings panel and stored in OS keyring."
+        },
+        "jamaEditor.clientSecret": {
+          "type": "string",
+          "default": "",
+          "description": "[DEPRECATED] Use Settings panel to configure credentials (stored in OS keyring).",
+          "deprecationMessage": "Credentials are now managed via the Jama Settings panel and stored in OS keyring."
+        },
+        "jamaEditor.cacheServerUrl": {
+          "type": "string",
+          "default": "",
+          "description": "URL of the Jama cache server (e.g. http://server-ip:8866). Used by the Database Management panel to download project databases."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@vscode/webview-ui-toolkit": "1.4.0",
+    "@tiptap/core": "^3.27.4",
+    "@tiptap/extension-image": "^3.27.4",
+    "@tiptap/extension-link": "^3.27.4",
+    "@tiptap/extension-subscript": "^3.27.4",
+    "@tiptap/extension-superscript": "^3.27.4",
+    "@tiptap/extension-table": "^3.27.4",
+    "@tiptap/extension-table-cell": "^3.27.4",
+    "@tiptap/extension-table-header": "^3.27.4",
+    "@tiptap/extension-table-row": "^3.27.4",
+    "@tiptap/extension-text-align": "^3.27.4",
+    "@tiptap/extension-underline": "^3.27.4",
+    "@tiptap/pm": "^3.27.4",
+    "@tiptap/starter-kit": "^3.27.4"
+  }
+}

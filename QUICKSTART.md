@@ -20,7 +20,7 @@ jama-post-install
 
 ## First Run — Cache Seed
 
-On first run, if no `~/.jama-connect/cache.db` exists:
+On first run, if no `~/.jama-mcp-v2/projects/<id>.db` exists:
 
 1. jama-connect checks `~/Downloads/` for `cache_seed.db.gz`
 2. If not found, opens your browser to the SharePoint download link
@@ -39,12 +39,12 @@ Add to `mcp_config.json`:
 {
   "jama-mcp-v2": {
     "command": "jama-connect",
-    "args": ["--daemon"],
+    "args": [],
     "env": {
       "JAMA_URL": "https://enphase.jamacloud.com",
       "JAMA_CLIENT_ID": "your-client-id",
       "JAMA_CLIENT_SECRET": "your-client-secret",
-      "JAMA_CACHE_DIR": "~/.jama-connect",
+      "JAMA_CACHE_DIR": "~/.jama-mcp-v2",
       "JAMA_REST_PORT": "8765"
     }
   }
@@ -110,9 +110,9 @@ Requires Developer Mode or admin privileges. `jama-post-install` falls back to W
 
 | Location | Purpose |
 |---|---|
-| `~/.jama-connect/cache.db` | Jama item/test cache (321 MB with seed) |
-| `~/.jama-connect/editor_db.sqlite` | Editor drafts and schema |
-| `~/.jama-connect/logs/` | Service logs |
+| `~/.jama-mcp-v2/projects/<id>.db` | Jama item/test cache (321 MB with seed) |
+| `~/.jama-mcp-v2/editor_db.sqlite` | Editor drafts and schema |
+| `~/.jama-mcp-v2/logs/` | Service logs |
 | `~/.devin/mcp-servers/jama-connect` | Devin symlink/junction |
 
 ## Documentation
@@ -124,6 +124,6 @@ Requires Developer Mode or admin privileges. `jama-post-install` falls back to W
 
 ## Support
 
-1. Check logs in `~/.jama-connect/logs/`
+1. Check logs in `~/.jama-mcp-v2/logs/`
 2. Review [README.md](README.md) for detailed architecture
 3. File issues at [github.com/kailash-enph/jama-connect](https://github.com/kailash-enph/jama-connect/issues)

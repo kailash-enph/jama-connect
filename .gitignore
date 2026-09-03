@@ -42,3 +42,20 @@ vscode-extension/node_modules/
 vscode-extension/dist/
 vscode-extension/out/
 vscode-extension/*.vsix
+
+# New structure (client/ + server/)
+client/backend/.venv/
+client/vscode-extension/node_modules/
+client/vscode-extension/out/
+client/vscode-extension/dist/
+client/vscode-extension/*.vsix
+
+# Generated cache files (server output)
+server/data/
+*.db
+*.db.gz
+*.db-shm
+*.db-wal
+
+# Temp files
+C:\Temp\fix_*.py

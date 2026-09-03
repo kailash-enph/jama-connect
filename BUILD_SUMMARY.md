@@ -118,7 +118,7 @@ Update your `mcp_config.json` to use the new package:
       "JAMA_URL": "https://enphase.jamacloud.com",
       "JAMA_CLIENT_ID": "your-client-id",
       "JAMA_CLIENT_SECRET": "your-client-secret",
-      "JAMA_CACHE_DIR": "~/.jama-connect",
+      "JAMA_CACHE_DIR": "~/.jama-mcp-v2",
       "JAMA_REST_PORT": "8765"
     }
   }

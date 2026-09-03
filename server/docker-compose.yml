@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: jama-cache-server
+    ports:
+      - "${SERVE_PORT:-8866}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${SERVE_DIR:-./data}:/usr/share/nginx/html:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/index.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
