@@ -1,6 +1,6 @@
 [project]
 name = "jama-connect"
-version = "0.5.1"
+version = "0.5.3"
 description = "Jama Connect — Unified MCP backend, REST API, viewer, and VS Code extension"
 requires-python = ">=3.12"
 dependencies = [

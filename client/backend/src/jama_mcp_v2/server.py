@@ -2816,7 +2816,7 @@ def _auto_install_extension() -> None:
 
     def _run() -> None:
         try:
-            from .post_install import get_bundled_vsix, install_vscode_extension
+            from .post_install import get_bundled_vsix, install_devin_extension, install_vscode_extension
             vsix = get_bundled_vsix()
             if not vsix.exists():
                 return
@@ -2826,9 +2826,10 @@ def _auto_install_extension() -> None:
                 # Re-check only if vsix is newer than sentinel (e.g. package was upgraded)
                 if vsix.stat().st_mtime <= sentinel.stat().st_mtime:
                     return
-            logger.info("Auto-installing VS Code extension (background)...")
-            ok = install_vscode_extension()
-            if ok:
+            logger.info("Auto-installing extensions (background): Devin + VS Code...")
+            ok_devin = install_devin_extension()
+            ok_vscode = install_vscode_extension()
+            if ok_devin or ok_vscode:
                 sentinel.touch()
         except Exception as exc:
             logger.debug("Extension auto-install skipped: %s", exc)
