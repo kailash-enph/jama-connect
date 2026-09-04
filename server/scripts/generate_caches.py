@@ -346,6 +346,240 @@ async def generate_master_db(project_metas: list[dict], out_dir: Path) -> int:
     return size
 
 
+def _write_index_html(out_dir: Path) -> None:
+    """Write a self-contained HTML dashboard to out_dir/index.html.
+
+    The page fetches index.json at load time (and every 60 s) so it always
+    shows current data without needing to regenerate the HTML file itself.
+    Works with both ``python -m http.server`` and nginx.
+    """
+    html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jama Connect Cache Server</title>
+<style>
+  :root {
+    --blue: #0066cc; --blue-light: #e8f0fb; --green: #1a7f37;
+    --amber: #b45309; --red: #cf222e; --gray: #57606a;
+    --border: #d0d7de; --bg: #f6f8fa; --card: #ffffff;
+    --radius: 8px; --shadow: 0 1px 4px rgba(0,0,0,.1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: var(--bg); color: #24292f; line-height: 1.5; padding: 24px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+  header h1 { font-size: 1.4rem; font-weight: 600; }
+  header .badge { background: var(--blue); color: #fff; font-size: .75rem;
+                  padding: 2px 8px; border-radius: 12px; font-weight: 600; }
+  .meta { color: var(--gray); font-size: .85rem; margin-bottom: 20px; }
+  .meta span { margin-right: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border);
+           border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 20px; }
+  .card-header { padding: 14px 20px; border-bottom: 1px solid var(--border);
+                  font-weight: 600; font-size: .95rem; display: flex;
+                  align-items: center; gap: 8px; }
+  .card-body { padding: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th { background: var(--bg); text-align: left; padding: 8px 12px;
+       border-bottom: 2px solid var(--border); color: var(--gray);
+       font-weight: 600; font-size: .8rem; text-transform: uppercase;
+       letter-spacing: .05em; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--blue-light); }
+  .project-name { font-weight: 600; }
+  .project-id { color: var(--gray); font-size: .8rem; }
+  .pill { display: inline-block; border-radius: 12px; font-size: .75rem;
+           padding: 2px 8px; font-weight: 600; }
+  .pill-green { background: #dafbe1; color: var(--green); }
+  .pill-amber { background: #fff8c5; color: var(--amber); }
+  .pill-red   { background: #ffebe9; color: var(--red); }
+  .dl-link { display: inline-flex; align-items: center; gap: 4px;
+              color: var(--blue); text-decoration: none; font-size: .82rem;
+              border: 1px solid var(--blue); border-radius: 4px;
+              padding: 2px 8px; margin-right: 6px; white-space: nowrap; }
+  .dl-link:hover { background: var(--blue-light); }
+  .size-note { color: var(--gray); font-size: .78rem; display: block; margin-top: 2px; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+               gap: 16px; }
+  .stat-box { background: var(--bg); border: 1px solid var(--border);
+              border-radius: var(--radius); padding: 14px 16px; }
+  .stat-box .val { font-size: 1.4rem; font-weight: 700; color: var(--blue); }
+  .stat-box .lbl { font-size: .8rem; color: var(--gray); margin-top: 2px; }
+  #refresh-ts { float: right; font-size: .78rem; color: var(--gray); }
+  .spinner { display: inline-block; width: 14px; height: 14px;
+             border: 2px solid var(--border); border-top-color: var(--blue);
+             border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #err { display: none; background: #ffebe9; border: 1px solid #ff8182;
+         color: var(--red); border-radius: var(--radius); padding: 12px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0066cc" stroke-width="2">
+    <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v5c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/>
+    <path d="M3 10v5c0 1.66 4.03 3 9 3s9-1.34 9-3v-5"/>
+    <path d="M3 15v4c0 1.66 4.03 3 9 3s9-1.34 9-3v-4"/>
+  </svg>
+  <h1>Jama Connect Cache Server</h1>
+  <span class="badge">LAN</span>
+</header>
+
+<div id="err">Failed to load index.json — is the server running?</div>
+
+<div class="meta">
+  <span id="gen-at">Loading...</span>
+  <span id="refresh-ts"></span>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h11A1.5 1.5 0 0 1 15 3.5v2A1.5 1.5 0 0 1 13.5 7h-11A1.5 1.5 0 0 1 1 5.5v-2Zm0 6A1.5 1.5 0 0 1 2.5 8h11A1.5 1.5 0 0 1 15 9.5v2A1.5 1.5 0 0 1 13.5 13h-11A1.5 1.5 0 0 1 1 11.5v-2Z"/>
+    </svg>
+    Summary
+  </div>
+  <div class="card-body">
+    <div class="stat-grid" id="stat-grid">
+      <div class="stat-box"><div class="val spinner" id="s-projects"></div><div class="lbl">Projects cached</div></div>
+      <div class="stat-box"><div class="val" id="s-items">—</div><div class="lbl">Total items</div></div>
+      <div class="stat-box"><div class="val" id="s-size">—</div><div class="lbl">Total data size</div></div>
+      <div class="stat-box"><div class="val" id="s-master">—</div><div class="lbl">Master DB</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v12.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25V1.75Z"/>
+    </svg>
+    Projects
+  </div>
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th>Items</th>
+          <th>Last Sync</th>
+          <th>Status</th>
+          <th>Downloads</th>
+        </tr>
+      </thead>
+      <tbody id="proj-tbody">
+        <tr><td colspan="5" style="text-align:center;color:var(--gray);padding:24px">
+          <span class="spinner"></span> Loading projects...
+        </td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Master Database</div>
+  <div class="card-body" id="master-info" style="color:var(--gray);font-size:.88rem">Loading...</div>
+</div>
+
+<script>
+function fmt_size(bytes) {
+  if (!bytes) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+function fmt_date(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2,'0');
+    return d.toLocaleDateString() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  } catch(e) { return iso; }
+}
+function age_pill(iso) {
+  if (!iso) return '<span class="pill pill-amber">Unknown</span>';
+  const age_h = (Date.now() - new Date(iso)) / 3600000;
+  if (age_h < 25)  return '<span class="pill pill-green">Fresh</span>';
+  if (age_h < 73)  return '<span class="pill pill-amber">Aging (' + Math.round(age_h) + 'h)</span>';
+  return '<span class="pill pill-red">Stale (' + Math.round(age_h/24) + 'd)</span>';
+}
+
+async function load() {
+  document.getElementById('refresh-ts').textContent = 'Refreshed: ' + new Date().toLocaleTimeString();
+  try {
+    const r = await fetch('./index.json?_=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    document.getElementById('err').style.display = 'none';
+
+    // Meta bar
+    document.getElementById('gen-at').textContent =
+      'Generated: ' + fmt_date(d.generated_at) + '  |  Server version: ' + (d.server_version || '?');
+
+    // Stats
+    const projs = Object.values(d.projects || {});
+    const total_items = projs.reduce((s, p) => s + (p.item_count || 0), 0);
+    const total_bytes = projs.reduce((s, p) => {
+      const v = p.variants || {};
+      return s + (v.data_only?.size_bytes || 0) + (v.with_images?.size_bytes || 0);
+    }, 0);
+    document.getElementById('s-projects').innerHTML = projs.length;
+    document.getElementById('s-projects').className = 'val';
+    document.getElementById('s-items').textContent = total_items.toLocaleString();
+    document.getElementById('s-size').textContent = fmt_size(total_bytes);
+    document.getElementById('s-master').textContent = fmt_size(d.master_db?.size_bytes);
+
+    // Projects table
+    const tbody = document.getElementById('proj-tbody');
+    if (!projs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--gray);padding:24px">No projects cached yet</td></tr>';
+    } else {
+      tbody.innerHTML = projs.map(p => {
+        const v = p.variants || {};
+        const dl_data = v.data_only ? `<a class="dl-link" href="${v.data_only.file}" download>
+          &#11123; Data only <span class="size-note">${fmt_size(v.data_only.size_bytes)}</span></a>` : '';
+        const dl_img = v.with_images ? `<a class="dl-link" href="${v.with_images.file}" download>
+          &#11123; With images <span class="size-note">${fmt_size(v.with_images.size_bytes)}
+          ${v.with_images.image_count ? '· ' + v.with_images.image_count + ' imgs' : ''}</span></a>` : '';
+        return `<tr>
+          <td>
+            <div class="project-name">${p.name || '(unnamed)'}</div>
+            <div class="project-id">ID: ${p.id}</div>
+          </td>
+          <td>${(p.item_count || 0).toLocaleString()}</td>
+          <td>${fmt_date(p.last_sync)}</td>
+          <td>${age_pill(p.last_sync)}</td>
+          <td>${dl_data}${dl_img}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Master DB card
+    const m = d.master_db || {};
+    document.getElementById('master-info').innerHTML =
+      `<b>File:</b> <a href="${m.file || 'master.db.gz'}">${m.file || 'master.db.gz'}</a> &nbsp;
+       <b>Size:</b> ${fmt_size(m.size_bytes)} &nbsp;
+       <b>Updated:</b> ${fmt_date(m.updated_at)}`;
+
+  } catch(e) {
+    document.getElementById('err').style.display = 'block';
+    document.getElementById('err').textContent = 'Error loading index.json: ' + e.message;
+  }
+}
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>
+"""
+    html_path = out_dir / "index.html"
+    html_path.write_text(html, encoding="utf-8")
+
+
 async def main_async(args: argparse.Namespace) -> None:
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -410,6 +644,10 @@ async def main_async(args: argparse.Namespace) -> None:
     index_path = out_dir / "index.json"
     index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
     logger.info("index.json written — %d project(s)", len(project_metas))
+
+    # Write index.html dashboard (fetches index.json dynamically at runtime)
+    _write_index_html(out_dir)
+    logger.info("index.html written")
     logger.info("=== Cache generation complete ===")
 
 
