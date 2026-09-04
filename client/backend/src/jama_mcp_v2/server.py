@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import importlib.metadata
 import json
 import logging
 import logging.handlers
@@ -1528,7 +1529,7 @@ async def api_health():
     return {
         "status": "ok",
         "service": "jama-unified-backend",
-        "version": "0.5.0",
+        "version": importlib.metadata.version("jama-connect"),
         "port": REST_PORT,
         "jama_url": JAMA_URL,
         "mcp_initialized": services.is_mcp_initialized,
