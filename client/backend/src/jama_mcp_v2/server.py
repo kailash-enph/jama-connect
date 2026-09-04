@@ -2809,10 +2809,40 @@ def main():
         mcp.run(transport="stdio")
 
 
+def _auto_install_extension() -> None:
+    """Background thread: install VS Code extension if not already done."""
+    import threading
+
+    def _run() -> None:
+        try:
+            from .post_install import get_bundled_vsix, install_vscode_extension
+            vsix = get_bundled_vsix()
+            if not vsix.exists():
+                return
+            # Sentinel file: skip if already installed this session/version
+            sentinel = vsix.parent / ".installed"
+            if sentinel.exists():
+                # Re-check only if vsix is newer than sentinel (e.g. package was upgraded)
+                if vsix.stat().st_mtime <= sentinel.stat().st_mtime:
+                    return
+            logger.info("Auto-installing VS Code extension (background)...")
+            ok = install_vscode_extension()
+            if ok:
+                sentinel.touch()
+        except Exception as exc:
+            logger.debug("Extension auto-install skipped: %s", exc)
+
+    t = threading.Thread(target=_run, daemon=True, name="jama-ext-install")
+    t.start()
+
+
 def _start_daemon(port: int = REST_PORT) -> None:
     """Run MCP stdio server + REST API in the same asyncio event loop."""
     import threading
     import uvicorn
+
+    # Auto-install VS Code extension in background (non-blocking, once per version)
+    _auto_install_extension()
 
     # Start REST API in a background thread
     config = uvicorn.Config(rest_app, host="127.0.0.1", port=port, log_level="info")
@@ -2848,6 +2878,9 @@ def run_rest():
 
     # Setup file-based logging for service mode
     _setup_service_logging()
+
+    # Auto-install VS Code extension in background (non-blocking, once per version)
+    _auto_install_extension()
 
     logger.info("Starting Jama MCP v2 REST API on port %d (localhost only)...", port)
     uvicorn.run(rest_app, host="127.0.0.1", port=port, log_level="info")
