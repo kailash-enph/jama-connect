@@ -433,8 +433,6 @@ def _write_index_html(out_dir: Path) -> None:
   html.dark .pill-amber{background:#2e2000}
   html.dark .pill-red{background:#2a0f0f}
   html.dark .pill-blue{background:#1a2d4a}
-  html.dark .sched-card{border-color:#30363d}
-  html.dark .sched-card:hover,html.dark .sched-card.active{border-color:#4a9eff;background:#1a2d4a}
   html.dark .add-form,html.dark .pw-form{background:#0d1117;border-color:#30363d}
   /* ── Theme toggle widget ── */
   .theme-toggle{display:flex;align-items:center;gap:2px;
@@ -533,14 +531,6 @@ def _write_index_html(out_dir: Path) -> None:
   .section-div::before,.section-div::after{content:'';flex:1;height:2px;
     background:linear-gradient(to right,var(--blue),var(--border))}
   .section-div::after{background:linear-gradient(to left,var(--blue),var(--border))}
-  /* schedule cards */
-  .sched-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px}
-  .sched-card{border:2px solid var(--border);border-radius:var(--radius);
-              padding:12px;cursor:pointer;text-align:center;transition:all .15s;user-select:none}
-  .sched-card:hover{border-color:var(--blue);background:var(--blue-light)}
-  .sched-card.active{border-color:var(--blue);background:var(--blue-light)}
-  .sched-card .sc-name{font-weight:700;font-size:.9rem;margin-bottom:2px}
-  .sched-card .sc-desc{font-size:.75rem;color:var(--gray)}
   /* sync log */
   .log-pre{font-family:"Cascadia Code","Consolas","Courier New",monospace;
            font-size:.78rem;line-height:1.5;background:#0d1117;color:#e6edf3;
@@ -828,49 +818,6 @@ def _write_index_html(out_dir: Path) -> None:
     </div>
   </div>
 
-  <!-- Schedule -->
-  <div class="card">
-    <div class="card-header">&#9200; Default Auto-Sync Schedule
-      <div class="hdr-actions">
-        <span style="font-size:.78rem;color:var(--gray)">Fallback for projects without a per-project override</span>
-      </div>
-    </div>
-    <div class="card-body">
-      <div class="sched-grid" id="sched-grid">
-        <div class="sched-card" data-val="daily" onclick="selectSched('daily')">
-          <div class="sc-name">Daily</div>
-          <div class="sc-desc">Every 24 h</div>
-        </div>
-        <div class="sched-card" data-val="biweekly" onclick="selectSched('biweekly')">
-          <div class="sc-name">Biweekly</div>
-          <div class="sc-desc">Every 3 days</div>
-        </div>
-        <div class="sched-card" data-val="weekly" onclick="selectSched('weekly')">
-          <div class="sc-name">Weekly</div>
-          <div class="sc-desc">Every 7 days</div>
-        </div>
-        <div class="sched-card" data-val="monthly" onclick="selectSched('monthly')">
-          <div class="sc-name">Monthly</div>
-          <div class="sc-desc">Every 30 days</div>
-        </div>
-        <div class="sched-card" data-val="never" onclick="selectSched('never')">
-          <div class="sc-name">Manual</div>
-          <div class="sc-desc">No auto sync</div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:12px">
-        <label style="font-size:.88rem;color:var(--gray);font-weight:600">
-          Sync time (UTC):
-          <input type="time" id="sched-time" value="02:00"
-                 style="width:auto;margin-left:6px;display:inline-block">
-        </label>
-        <span id="next-sync-label" style="font-size:.85rem;color:var(--gray)"></span>
-      </div>
-      <div id="sched-result" style="display:none;margin-bottom:10px"></div>
-      <button class="btn btn-primary" onclick="saveSchedule()">Save Schedule</button>
-    </div>
-  </div>
-
   <!-- Security -->
   <div class="card">
     <div class="card-header">&#128274; Security</div>
@@ -1055,12 +1002,7 @@ async function loadAdminPanel() {
     const d = await api('GET', '/admin/config');
     renderAdminProjects(d.projects);
     updateImgPidDropdown(d.projects);
-    setSelectedSched(d.schedule);
-    document.getElementById('sched-time').value = d.schedule_time || '02:00';
-    const ns = d.next_sync
-      ? `Next sync (any project): ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})`
-      : 'No scheduled syncs';
-    document.getElementById('next-sync-label').textContent = ns;
+
   } catch(e) {
     console.error('loadAdminPanel:', e);
   }
@@ -1089,9 +1031,6 @@ function renderAdminProjects(projects) {
     const nextLbl = p.next_sync
       ? `<div style="font-size:.72rem;color:var(--gray);margin-top:2px">Next: ${fmtRelTime(p.next_sync)}</div>`
       : '';
-    const globalBadge = p.schedule_is_global
-      ? `<span style="font-size:.68rem;color:var(--gray);margin-left:4px">(default)</span>`
-      : '';
     const schedCell = `
       <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
         <div style="display:flex;gap:6px;align-items:center">
@@ -1105,7 +1044,6 @@ function renderAdminProjects(projects) {
         <div style="display:flex;align-items:center;gap:4px">
           <button class="btn btn-sm btn-secondary" style="padding:2px 8px;font-size:.76rem"
             onclick="saveProjectSchedule(${p.id})">Save</button>
-          ${globalBadge}
         </div>
         ${nextLbl}
       </div>`;
@@ -1331,25 +1269,7 @@ function copyImgScript(btn) {
   });
 }
 
-// ── schedule ──────────────────────────────────────────────────────────────
-let _selectedSched = 'biweekly';
-function selectSched(val) {
-  _selectedSched = val;
-  document.querySelectorAll('.sched-card').forEach(c => {
-    c.classList.toggle('active', c.dataset.val === val);
-  });
-}
-function setSelectedSched(val) { selectSched(val || 'biweekly'); }
-async function saveSchedule() {
-  const t = document.getElementById('sched-time').value;
-  try {
-    const d = await api('POST', '/admin/schedule', {schedule: _selectedSched, schedule_time: t});
-    const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
-    document.getElementById('next-sync-label').textContent = ns;
-    showAlert('sched-result', 'Schedule saved: ' + d.label, 'ok');
-    setTimeout(() => hideAlert('sched-result'), 3000);
-  } catch(e) { showAlert('sched-result', e.message, 'err'); }
-}
+
 
 // ── password change ────────────────────────────────────────────────────────
 function showPwForm() {

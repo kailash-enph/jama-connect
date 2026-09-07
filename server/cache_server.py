@@ -325,6 +325,19 @@ except ImportError as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scheduler_task
+    # Seed per-project schedule entries for any projects that pre-date this feature
+    cfg = load_config()
+    overrides: dict = cfg.setdefault("project_schedules", {})
+    changed = False
+    for pid in cfg.get("projects", []):
+        if str(pid) not in overrides:
+            overrides[str(pid)] = {
+                "schedule": cfg.get("schedule", "biweekly"),
+                "schedule_time": cfg.get("schedule_time", "02:00"),
+            }
+            changed = True
+    if changed:
+        save_config(cfg)
     _scheduler_task = asyncio.create_task(_scheduler_loop())
     logger.info("Background scheduler started")
     yield
@@ -868,7 +881,7 @@ def admin_config(request: Request, _: None = Depends(_require_auth)):
             "schedule_time": sched_time,
             "schedule_label": SCHEDULE_LABELS.get(sched, ""),
             "next_sync": next_sync.isoformat() if next_sync else None,
-            "schedule_is_global": not has_override,
+
         })
     return {
         "projects": projects_out,
@@ -887,7 +900,16 @@ async def add_project(body: AddProjectBody, _: None = Depends(_require_auth)):
     if is_new:
         pids.append(body.project_id)
         cfg["projects"] = pids
+        # Seed a per-project schedule entry from the current global default
+        # so the project immediately shows an explicit schedule in the table.
+        overrides: dict = cfg.setdefault("project_schedules", {})
+        if str(body.project_id) not in overrides:
+            overrides[str(body.project_id)] = {
+                "schedule": cfg.get("schedule", "biweekly"),
+                "schedule_time": cfg.get("schedule_time", "02:00"),
+            }
         save_config(cfg)
+        _recompute_all_project_schedules(cfg)
     if not _sync_running:
         asyncio.create_task(run_sync([body.project_id]))
         syncing = True
