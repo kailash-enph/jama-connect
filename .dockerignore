@@ -1,0 +1,20 @@
+# ── Node / build artifacts ────────────────────────────────────────────────────
+client/vscode-extension/node_modules
+client/vscode-extension/out
+client/viewer/node_modules
+client/viewer/.next
+client/viewer/out
+
+# ── Python virtualenvs & cache ───────────────────────────────────────────────
+client/backend/.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+
+# ── Generated data (mounted as volume at runtime) ─────────────────────────────
+server/data
+
+# ── Secrets / local config ────────────────────────────────────────────────────
+# .env is bind-mounted at runtime — do NOT bake credentials into the image
+server/.env
