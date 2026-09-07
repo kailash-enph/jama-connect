@@ -9,12 +9,23 @@ Three-tier cache strategy:
   1. MasterDb (master.db.gz from cache server) — project list, item counts
   2. ProjectDb (projects/{id}.db or {id}.db.gz from cache server) — full project data
   3. Legacy JamaCache (cache.db) — read-only fallback for existing data
+
+Two-DB image architecture:
+  projects/{id}.db          — data (items/FTS/relations); may also contain images if
+                              downloaded as "with_images" variant
+  projects/{id}_images.db   — images-only DB from {id}_images.db.gz on the cache server;
+                              cumulative and persistent across nightly runs
+
+Image blob lookup order (get_image_blob):
+  1. projects/{id}.db         (contains images if variant was "with_images")
+  2. projects/{id}_images.db  (separate images DB if downloaded independently)
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -59,10 +70,17 @@ class CacheManager:
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
-    # ---------- Project DB access ----------
+    # ---------- Path helpers ----------
 
     def _project_path(self, project_id: int) -> Path:
+        """Path to the main project DB (data only, or merged with_images)."""
         return self._projects_dir / f"{project_id}.db"
+
+    def _images_path(self, project_id: int) -> Path:
+        """Path to the separate images-only DB (from {id}_images.db.gz)."""
+        return self._projects_dir / f"{project_id}_images.db"
+
+    # ---------- Project DB access ----------
 
     async def get_project_db(self, project_id: int) -> ProjectDb:
         """Return an open ProjectDb for this project; create if needed."""
@@ -82,15 +100,24 @@ class CacheManager:
         return self._project_path(project_id).exists()
 
     async def list_local_projects(self) -> list[dict[str, Any]]:
-        """Return metadata for all projects that have local DB files."""
+        """Return metadata for all projects that have local DB files.
+
+        Skips *_images.db files (those are reported as part of the owning project).
+        """
         result = []
         for path in sorted(self._projects_dir.glob("*.db")):
+            # Skip the separate images DBs — they belong to their project entry
+            if path.stem.endswith("_images"):
+                continue
             try:
                 pid = int(path.stem)
             except ValueError:
                 continue
             db = await self.get_project_db(pid)
             stats = await db.get_stats()
+            # Annotate with images DB status
+            stats["has_images_db"] = self.has_images_db(pid)
+            stats["images_db_count"] = self.images_db_count(pid)
             result.append(stats)
         return result
 
@@ -106,6 +133,66 @@ class CacheManager:
             logger.info("Deleted ProjectDb for project %d", project_id)
             return True
         return False
+
+    # ---------- Images DB access ----------
+
+    def has_images_db(self, project_id: int) -> bool:
+        """Return True if a separate images DB exists for this project."""
+        return self._images_path(project_id).exists()
+
+    def images_db_count(self, project_id: int) -> int:
+        """Return the number of images in the separate images DB (0 if absent)."""
+        path = self._images_path(project_id)
+        if not path.exists():
+            return 0
+        try:
+            conn = sqlite3.connect(str(path))
+            try:
+                return conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+            except sqlite3.OperationalError:
+                return 0
+            finally:
+                conn.close()
+        except Exception:
+            return 0
+
+    async def delete_images_db(self, project_id: int) -> bool:
+        """Delete the separate images DB. Returns True if deleted."""
+        path = self._images_path(project_id)
+        if path.exists():
+            path.unlink()
+            logger.info("Deleted images DB for project %d", project_id)
+            return True
+        return False
+
+    async def get_image_blob(
+        self, project_id: int, attachment_id: int
+    ) -> tuple[str, bytes] | None:
+        """Look up an image blob with a two-DB fallback chain.
+
+        Lookup order:
+          1. Main project DB ({id}.db) — present when downloaded as "with_images"
+          2. Separate images DB ({id}_images.db) — present when downloaded as "images"
+
+        Returns (mime_type, data) or None if not found in either DB.
+        """
+        # 1. Main project DB (covers "with_images" downloads)
+        if await self.has_project_db(project_id):
+            db = await self.get_project_db(project_id)
+            result = await db.get_image_blob(attachment_id)
+            if result is not None:
+                return result
+
+        # 2. Separate images DB (covers "images" downloads)
+        images_path = self._images_path(project_id)
+        if images_path.exists():
+            result = await asyncio.to_thread(
+                _read_image_from_sqlite, images_path, attachment_id
+            )
+            if result is not None:
+                return result
+
+        return None
 
     # ---------- MasterDb access ----------
 
@@ -230,3 +317,27 @@ async def _search_one(
         params,
     )
     return [dict(r) for r in rows]
+
+
+def _read_image_from_sqlite(
+    db_path: Path, attachment_id: int
+) -> tuple[str, bytes] | None:
+    """Synchronous helper — reads one image row from a plain SQLite file.
+
+    Used by CacheManager.get_image_blob() via asyncio.to_thread() so the
+    images-only DB does not need a persistent aiosqlite connection.
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT mime_type, data FROM images WHERE attachment_id = ?",
+                (attachment_id,),
+            ).fetchone()
+            return (row[0], bytes(row[1])) if row else None
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            conn.close()
+    except Exception:
+        return None

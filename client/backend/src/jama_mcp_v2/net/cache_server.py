@@ -5,9 +5,15 @@ local projects/ directory. Yields SSE-style progress dicts so the
 caller can stream status to the client via SseQueue.
 
 Protocol:
-  GET {base_url}/index.json       → CacheIndex (projects + variants)
-  GET {base_url}/projects/{id}.db.gz   → data_only SQLite + gzip
-  GET {base_url}/projects/{id}_with_images.db.gz → with BLOBs
+  GET {base_url}/index.json                          → CacheIndex (projects + variants)
+  GET {base_url}/projects/{id}.db.gz                 → data_only  (items/FTS, no images)
+  GET {base_url}/projects/{id}_images.db.gz          → images-only (cumulative, persistent)
+  GET {base_url}/projects/{id}_with_images.db.gz     → merged (data + all images)
+
+Variant → URL suffix mapping used by download_project_db():
+  "data_only"   → (no suffix)         → {id}.db.gz
+  "images"      → _images             → {id}_images.db.gz
+  "with_images" → _with_images        → {id}_with_images.db.gz
 """
 
 from __future__ import annotations
@@ -68,9 +74,10 @@ async def download_project_db(
         base_url:    Cache server base URL (e.g. "http://192.168.1.50:8866")
         project_id:  Jama project ID
         dest_path:   Where to write the final .db file
-        variant:     "data_only" or "with_images"
+        variant:     "data_only", "images", or "with_images"
     """
-    suffix = "_with_images" if variant == "with_images" else ""
+    _SUFFIXES = {"with_images": "_with_images", "images": "_images"}
+    suffix = _SUFFIXES.get(variant, "")
     url = f"{base_url.rstrip('/')}/projects/{project_id}{suffix}.db.gz"
     tmp_gz = dest_path.with_suffix(".db.gz.tmp")
     dest_path.parent.mkdir(parents=True, exist_ok=True)

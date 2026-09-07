@@ -68,11 +68,20 @@ async def set_cache_server_url(
 @router.get("/download/{project_id}")
 async def download_project(
     project_id: int,
-    variant: str = Query("data_only", description="'data_only' or 'with_images'"),
+    variant: str = Query(
+        "data_only",
+        description="'data_only' | 'images' | 'with_images'. "
+                    "'images' downloads the cumulative images-only DB ({id}_images.db.gz).",
+    ),
     svc=Depends(get_initialized_svc),
     mgr=Depends(get_cache_manager),
 ):
     """SSE stream: download a project .db.gz from the cache server and decompress it.
+
+    Variant routing:
+      "data_only"   → {id}.db.gz          → projects/{id}.db
+      "images"      → {id}_images.db.gz   → projects/{id}_images.db
+      "with_images" → {id}_with_images.db.gz → projects/{id}.db (merged)
 
     Yields Server-Sent Events:
         data: {"phase": "connecting"}
@@ -84,8 +93,12 @@ async def download_project(
     The VS Code extension's DbManagementPanel listens to this stream to show
     a live progress bar.
     """
+    if variant not in ("data_only", "images", "with_images"):
+        raise HTTPException(400, f"Invalid variant '{variant}'; must be data_only, images, or with_images")
+
     url = _get_url(svc)
-    dest = mgr._project_path(project_id)
+    # Route the download destination based on variant
+    dest = mgr._images_path(project_id) if variant == "images" else mgr._project_path(project_id)
 
     bus = SseQueue()
 
@@ -95,12 +108,19 @@ async def download_project(
                 bus.put_nowait(event)
                 if event.get("phase") in ("done", "error"):
                     break
-            # If download succeeded, open the DB immediately
             if dest.exists():
-                try:
-                    await mgr.get_project_db(project_id)
-                except Exception as e:
-                    logger.warning("Failed to open newly downloaded DB: %s", e)
+                if variant == "images":
+                    # Images DB downloaded — log count, no ProjectDb needed
+                    count = mgr.images_db_count(project_id)
+                    logger.info(
+                        "Images DB ready for project %d: %d image(s)", project_id, count
+                    )
+                else:
+                    # Data or merged DB — open immediately so it's ready for queries
+                    try:
+                        await mgr.get_project_db(project_id)
+                    except Exception as e:
+                        logger.warning("Failed to open newly downloaded DB: %s", e)
         except Exception as e:
             bus.put_nowait({"phase": "error", "message": str(e)})
         finally:
