@@ -8,10 +8,7 @@ import {
   XCircle,
   Play,
   Zap,
-  ImageIcon,
-  Settings,
 } from "lucide-react";
-import Link from "next/link";
 import {
   getProjects,
   startSync,
@@ -23,8 +20,6 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
-
 export default function SyncPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
@@ -33,9 +28,6 @@ export default function SyncPage() {
   const [syncing, setSyncing] = useState(false);
   const [loading, setLoading] = useState(true);
   const esRef = useRef<EventSource | null>(null);
-  const [hasCookie, setHasCookie] = useState(false);
-  const [importStatus, setImportStatus] = useState<string | null>(null);
-  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     getProjects()
@@ -46,12 +38,6 @@ export default function SyncPage() {
       })
       .catch(() => setLoading(false));
 
-    // Check if session cookie is stored
-    fetch(`${API_BASE}/settings/session`)
-      .then((r) => r.json())
-      .then((d) => setHasCookie(d.has_cookie || d.valid))
-      .catch(() => {});
-
     return () => esRef.current?.close();
   }, []);
 
@@ -59,19 +45,6 @@ export default function SyncPage() {
     if (!selectedProject) return;
     getLastSync(selectedProject).then(setLastSync).catch(() => setLastSync(null));
   }, [selectedProject]);
-
-  const bulkImportImages = async () => {
-    setImporting(true);
-    setImportStatus("Downloading images...");
-    try {
-      const resp = await fetch(`${API_BASE}/api/images/bulk-import`, { method: "POST" });
-      const data = await resp.json();
-      setImportStatus(data.message || `Done: ${data.downloaded} downloaded, ${data.failed} failed`);
-    } catch (err) {
-      setImportStatus("Import failed");
-    }
-    setImporting(false);
-  };
 
   const handleSync = async (incremental: boolean) => {
     if (!selectedProject || syncing) return;
@@ -85,10 +58,6 @@ export default function SyncPage() {
         setSyncing(false);
         esRef.current?.close();
         getLastSync(selectedProject).then(setLastSync).catch(() => {});
-        // Auto-import images after successful sync if cookie is stored
-        if (data.state === "done" && hasCookie) {
-          bulkImportImages();
-        }
       }
     });
 
@@ -110,40 +79,6 @@ export default function SyncPage() {
   return (
     <div className="p-6 space-y-6">
       <h1 className="text-2xl font-bold">Sync Dashboard</h1>
-
-      {/* Session Cookie — link to Settings */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full ${hasCookie ? "bg-green-500" : "bg-red-500"}`} />
-            <span className="text-sm font-medium">
-              {hasCookie ? "Session cookie active" : "No session cookie"}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            {hasCookie && (
-              <button
-                onClick={bulkImportImages}
-                disabled={importing}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 transition-colors"
-              >
-                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
-                Import Images
-              </button>
-            )}
-            <Link
-              href="/settings"
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors"
-            >
-              <Settings className="h-3.5 w-3.5" />
-              Configure in Settings
-            </Link>
-          </div>
-        </div>
-        {importStatus && (
-          <p className="text-xs mt-2 text-gray-600 dark:text-gray-400">{importStatus}</p>
-        )}
-      </div>
 
       {/* Project selector + buttons */}
       <div className="flex items-end gap-3 flex-wrap">

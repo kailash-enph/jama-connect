@@ -362,50 +362,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
 
-    // Set JSESSIONID for web UI image downloads
-    vscode.commands.registerCommand("jamaEditor.setSessionCookie", async () => {
-      try {
-        const editorApi = editorProvider?.getEditorApi();
-        if (!editorApi) {
-          vscode.window.showErrorMessage("Editor backend not available.");
-          return;
-        }
-
-        // Check if already authenticated
-        const status = await editorApi.sessionStatus();
-        if (status.authenticated) {
-          const action = await vscode.window.showInformationMessage(
-            "Session cookie is already set. Update it?",
-            "Update", "Clear", "Cancel"
-          );
-          if (action === "Clear") {
-            await editorApi.clearSession();
-            vscode.window.showInformationMessage("Session cookie cleared.");
-            return;
-          }
-          if (action !== "Update") { return; }
-        }
-
-        const jsessionid = await vscode.window.showInputBox({
-          prompt: "Paste JSESSIONID from browser (F12 → Application → Cookies → enphase.jamacloud.com)",
-          placeHolder: "e.g. 1A2B3C4D5E6F...",
-          password: true,
-          ignoreFocusOut: true,
-        });
-        if (!jsessionid) { return; }
-
-        const result = await editorApi.setSessionCookie(jsessionid);
-        if (result.valid) {
-          vscode.window.showInformationMessage("✓ Session cookie set — images downloading in background.");
-        } else {
-          vscode.window.showWarningMessage("Cookie saved but could not be validated. It may be expired — try copying a fresh one.");
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Set session cookie failed: ${msg}`);
-      }
-    }),
-
     // Incremental sync (changed items only)
     vscode.commands.registerCommand("jamaEditor.incrementalSync", async () => {
       const projectId = projectSelector?.selectedId;
@@ -432,45 +388,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`Incremental sync failed: ${msg}`);
-      }
-    }),
-
-    // Prefetch all images
-    vscode.commands.registerCommand("jamaEditor.prefetchImages", async () => {
-      try {
-        const editorApi = editorProvider?.getEditorApi();
-        if (!editorApi) {
-          vscode.window.showErrorMessage("Editor backend not available.");
-          return;
-        }
-        const result = await editorApi.triggerPrefetch();
-        vscode.window.showInformationMessage(result.message);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Prefetch failed: ${msg}`);
-      }
-    }),
-
-    // Show session & image prefetch status
-    vscode.commands.registerCommand("jamaEditor.sessionStatus", async () => {
-      try {
-        const editorApi = editorProvider?.getEditorApi();
-        if (!editorApi) {
-          vscode.window.showErrorMessage("Editor backend not available.");
-          return;
-        }
-        const session = await editorApi.sessionStatus();
-        const prefetch = await editorApi.prefetchStatus();
-
-        const lines = [
-          `Session: ${session.authenticated ? "✓ Authenticated" : "✗ Not set"}`,
-          `Cookie: ${session.has_cookie ? "Present" : "Missing"}`,
-          `Image Prefetch: ${prefetch.status} — ${prefetch.message}`,
-        ];
-        vscode.window.showInformationMessage(lines.join("  |  "));
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Status check failed: ${msg}`);
       }
     }),
 

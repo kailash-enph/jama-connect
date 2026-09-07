@@ -220,13 +220,13 @@ class TestPushTestCycleRefreshesCache:
 class TestProxyImageEndpoint:
     @pytest.fixture(autouse=True)
     def isolate_image_cache(self, tmp_path, monkeypatch):
-        """Point image_cache_dir at a fresh temp dir per test.
+        """Point image cache at a fresh temp dir per test.
 
-        Without this, image_cache_dir='' causes os.path.join('', id) to resolve
-        to a bare filename in the CWD, which bleeds state between tests.
+        Patches _SVC_CACHE_DIR in editor_server so _image_cache_path()
+        resolves into tmp_path instead of the real ~/.jama-mcp-v2 dir.
         """
-        from jama_mcp_v2.services import services as registry
-        monkeypatch.setattr(registry, "image_cache_dir", str(tmp_path))
+        import jama_editor.editor_server as es
+        monkeypatch.setattr(es, "_SVC_CACHE_DIR", str(tmp_path))
 
     @pytest.mark.asyncio
     async def test_proxy_image_returns_bytes(self, client, mock_services):
@@ -246,9 +246,8 @@ class TestProxyImageEndpoint:
         mock_api = mock_services["api"]
         # All fallback paths must fail for the endpoint to return 404:
         #   1. disk cache — empty tmp_path, no file → skips
-        #   2. web session — not set → skips
-        #   3. REST attachment endpoint → raises
-        #   4. REST files endpoint → raises
+        #   2. REST attachment endpoint → raises
+        #   3. REST files endpoint → raises
         mock_api.get_attachment = AsyncMock(side_effect=Exception("Not found"))
         mock_api.download_attachment = AsyncMock(side_effect=Exception("Not found"))
         mock_api.download_file = AsyncMock(side_effect=Exception("Not found"))

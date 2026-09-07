@@ -65,82 +65,12 @@ def load_env(env_path: str) -> None:
     logger.info("Loaded env from %s", env_path)
 
 
-async def fetch_all_images(
-    project_id: int, items: list[dict], session_cookie: str, jama_url: str
-) -> dict[int, tuple[str, str, bytes]]:
-    """Fetch browser-pasted inline images using JSESSIONID cookie.
-    
-    Returns dict mapping attachment_id -> (filename, mime_type, bytes).
-    """
-    try:
-        import httpx
-    except ImportError:
-        logger.warning("httpx not available — skipping image fetch")
-        return {}
-
-    IMG_RE = re.compile(
-        r'https?://[^"\'\s]*?/(?:rest/v1/(?:attachments|files)/(\d+)(?:/file)?'
-        r'|attachment/(\d+)/([^"\'\s\\]+))',
-    )
-
-    # Collect all unique (att_id, filename) pairs
-    web_ids: dict[int, str] = {}  # web attachment ID -> filename
-    rest_ids: set[int] = set()    # REST attachment IDs (fetched via API instead)
-
-    for item in items:
-        desc = item.get("description", "") or item.get("fields_json", "")
-        for m in IMG_RE.finditer(desc):
-            if m.group(1):
-                rest_ids.add(int(m.group(1)))
-            elif m.group(2):
-                att_id = int(m.group(2))
-                fname = m.group(3) or "image.png"
-                if att_id not in web_ids:
-                    web_ids[att_id] = fname
-
-    results: dict[int, tuple[str, str, bytes]] = {}
-    if not web_ids and not rest_ids:
-        return results
-
-    logger.info("  Images: %d web-pasted, %d REST-API (project %d)", len(web_ids), len(rest_ids), project_id)
-
-    # Fetch web-pasted images via JSESSIONID
-    if web_ids and session_cookie:
-        headers = {
-            "Cookie": f"JSESSIONID={session_cookie}",
-            "Referer": f"{jama_url}/",
-        }
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30) as client:
-            for att_id, fname in web_ids.items():
-                url = f"{jama_url}/attachment/{att_id}/{fname}"
-                try:
-                    r = await client.get(url)
-                    if r.status_code == 200:
-                        ct = r.headers.get("content-type", "image/png")
-                        if "text/html" not in ct:
-                            results[att_id] = (fname, ct, r.content)
-                        else:
-                            logger.debug("  Web image %d: got HTML — session may be expired", att_id)
-                    else:
-                        logger.debug("  Web image %d: HTTP %d", att_id, r.status_code)
-                except Exception as e:
-                    logger.debug("  Web image %d error: %s", att_id, e)
-
-    logger.info(
-        "  Fetched %d/%d web images (session %s)",
-        len(results), len(web_ids),
-        "OK" if session_cookie else "not provided",
-    )
-    return results
-
-
 async def generate_project(
     project_id: int,
     out_dir: Path,
     jama_url: str,
     client_id: str,
     client_secret: str,
-    session_cookie: str | None,
 ) -> dict:
     """Generate data_only and (optionally) with_images .db.gz for one project.
     
@@ -194,21 +124,9 @@ async def generate_project(
         # Get all items for image URL scanning
         all_items = await proj_db2.get_all_items()
 
-        # Fetch REST-API images via OAuth Bearer token (no session needed)
+        # Fetch REST-API images via OAuth Bearer token
         rest_count = await _fetch_rest_images(proj_db2, all_items, jama_url, client_id, client_secret)
-
-        # Fetch web-pasted images via JSESSIONID (optional)
-        web_images = {}
-        if session_cookie:
-            web_images = await fetch_all_images(project_id, all_items, session_cookie, jama_url)
-            for att_id, (fname, mime, data) in web_images.items():
-                await proj_db2.upsert_image_blob(att_id, fname, mime, data)
-
-        total_images = rest_count + len(web_images)
-        logger.info(
-            "  Images: %d REST + %d web-pasted = %d total",
-            rest_count, len(web_images), total_images,
-        )
+        logger.info("  Images: %d REST-API images embedded", rest_count)
     finally:
         await proj_db2.close()
 
@@ -235,7 +153,7 @@ async def generate_project(
             "with_images": {
                 "file": f"projects/{project_id}_with_images.db.gz",
                 "size_bytes": with_images_size,
-                "image_count": total_images,
+                "image_count": rest_count,
             },
         },
     }
@@ -766,35 +684,6 @@ def _write_index_html(out_dir: Path) -> None:
     </div>
   </div>
 
-  <!-- Jama Session Cookie -->
-  <div class="card">
-    <div class="card-header">
-      &#127850; Jama Session Cookie (JSESSIONID)
-      <div class="hdr-actions">
-        <span id="jsid-status-badge"></span>
-      </div>
-    </div>
-    <div class="card-body">
-      <p style="font-size:.85rem;color:var(--gray);margin-bottom:12px">
-        Required for syncing <b>browser-pasted inline images</b>. Expires every ~8 hours.<br>
-        Get it from: <code style="background:var(--bg);padding:1px 5px;border-radius:3px">Browser DevTools &rarr; Application &rarr; Cookies &rarr; enphase.jamacloud.com &rarr; JSESSIONID</code>
-      </p>
-      <div class="pw-form" id="jsid-form">
-        <div class="field">
-          <label>JSESSIONID value</label>
-          <input type="text" id="jsid-input" placeholder="Paste JSESSIONID value here"
-                 style="font-family:monospace;font-size:.82rem"
-                 onkeydown="if(event.key==='Enter')saveJsid()">
-        </div>
-        <div id="jsid-result" style="display:none;margin-bottom:10px"></div>
-        <div class="act">
-          <button class="btn btn-primary" onclick="saveJsid()">Save Cookie</button>
-          <button class="btn btn-danger" onclick="clearJsid()">Clear</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- Security -->
   <div class="card">
     <div class="card-header">&#128274; Security</div>
@@ -982,7 +871,6 @@ async function loadAdminPanel() {
     document.getElementById('sched-time').value = d.schedule_time || '02:00';
     const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
     document.getElementById('next-sync-label').textContent = ns;
-    loadJsidStatus();
   } catch(e) {
     console.error('loadAdminPanel:', e);
   }
@@ -1194,40 +1082,6 @@ async function saveSchedule() {
   } catch(e) { showAlert('sched-result', e.message, 'err'); }
 }
 
-// ── session cookie (JSESSIONID) ───────────────────────────────────────────
-async function loadJsidStatus() {
-  try {
-    const d = await api('GET', '/admin/session-cookie');
-    const badge = document.getElementById('jsid-status-badge');
-    if (d.set) {
-      badge.innerHTML = '<span class="pill pill-green">&#10003; Cookie set</span>';
-    } else {
-      badge.innerHTML = '<span class="pill pill-amber">Not set — images skipped</span>';
-    }
-  } catch(_) {}
-}
-async function saveJsid() {
-  const val = document.getElementById('jsid-input').value.trim();
-  if (!val) { showAlert('jsid-result', 'Paste the JSESSIONID value first', 'err'); return; }
-  try {
-    const d = await api('POST', '/admin/session-cookie', {jsessionid: val});
-    document.getElementById('jsid-input').value = '';
-    showAlert('jsid-result', d.message + ' — will be used on next sync', 'ok');
-    loadJsidStatus();
-    setTimeout(() => hideAlert('jsid-result'), 4000);
-  } catch(e) { showAlert('jsid-result', e.message, 'err'); }
-}
-async function clearJsid() {
-  if (!confirm('Clear the JSESSIONID? Images will be skipped on the next sync.')) return;
-  try {
-    const d = await api('POST', '/admin/session-cookie', {jsessionid: ''});
-    document.getElementById('jsid-input').value = '';
-    showAlert('jsid-result', d.message, 'info');
-    loadJsidStatus();
-    setTimeout(() => hideAlert('jsid-result'), 3000);
-  } catch(e) { showAlert('jsid-result', e.message, 'err'); }
-}
-
 // ── password change ────────────────────────────────────────────────────────
 function showPwForm() {
   document.getElementById('pw-form').style.display = 'block';
@@ -1270,8 +1124,6 @@ async def main_async(args: argparse.Namespace) -> None:
     jama_url = os.environ.get("JAMA_URL", "https://enphase.jamacloud.com").rstrip("/")
     client_id = os.environ.get("JAMA_CLIENT_ID", "")
     client_secret = os.environ.get("JAMA_CLIENT_SECRET", "")
-    session_cookie = os.environ.get("JAMA_SESSION_COOKIE", "").strip() or None
-
     if not client_id or not client_secret:
         logger.error("JAMA_CLIENT_ID and JAMA_CLIENT_SECRET must be set in .env or environment")
         sys.exit(1)
@@ -1296,15 +1148,12 @@ async def main_async(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     logger.info("Generating caches for %d project(s): %s", len(project_ids), project_ids)
-    if session_cookie:
-        logger.info("JSESSIONID provided — will fetch web-pasted images")
-    else:
-        logger.info("No JSESSIONID — only REST-API images will be embedded")
+    logger.info("Browser-pasted images synced separately via admin panel Browser Image Sync")
 
     project_metas = []
     for pid in project_ids:
         try:
-            meta = await generate_project(pid, out_dir, jama_url, client_id, client_secret, session_cookie)
+            meta = await generate_project(pid, out_dir, jama_url, client_id, client_secret)
             project_metas.append(meta)
         except Exception as e:
             logger.error("Project %d failed: %s", pid, e, exc_info=True)

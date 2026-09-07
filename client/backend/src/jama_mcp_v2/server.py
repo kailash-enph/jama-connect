@@ -63,7 +63,6 @@ exporter: Exporter | None = None
 search_engine: SearchEngine | None = None
 attachment_mgr: AttachmentManager | None = None
 progress_bus = ProgressBus()
-_session_cookie: str = ""  # Browser JSESSIONID for SAML-protected downloads
 
 
 def _rebind_module_aliases() -> None:
@@ -2064,106 +2063,6 @@ async def api_create_test_cycle(plan_id: int, body: dict):
         end_date=body["end_date"],
         test_groups=body.get("test_groups"),
     )
-
-
-# ---------- REST: Session Cookie ----------
-
-@rest_app.post("/api/session-cookie")
-async def api_set_session_cookie(request: Request):
-    """Store a Jama browser session cookie for SAML-protected downloads."""
-    global _session_cookie
-    body = await request.json()
-    cookie = body.get("cookie", "").strip()
-    if not cookie:
-        return Response(status_code=400, content="Missing 'cookie' field")
-    # Normalize: accept raw JSESSIONID value or full cookie header
-    if "=" not in cookie:
-        cookie = f"JSESSIONID={cookie}"
-    _session_cookie = cookie
-    logger.info("Session cookie stored (%d chars)", len(cookie))
-    return {"status": "stored", "length": len(cookie)}
-
-
-@rest_app.get("/api/session-cookie")
-async def api_get_session_cookie():
-    """Check if a session cookie is stored."""
-    return {"has_cookie": bool(_session_cookie), "length": len(_session_cookie)}
-
-
-@rest_app.post("/api/images/bulk-import")
-async def api_bulk_import_images():
-    """Download all uncached embedded images using the stored session cookie."""
-    import httpx
-    from pathlib import Path
-    from fastapi.responses import JSONResponse
-
-    if not _session_cookie:
-        return JSONResponse(status_code=400, content={"error": "No session cookie stored. POST /api/session-cookie first."})
-    assert cache
-
-    # Get uncached list
-    pattern = re.compile(
-        r'(?:https?://[^"\'\s]*jamacloud\.com)?/(?:attachment|rest/v1/attachments)/(\d+)/([^"\'\s]*)'
-    )
-    rows = await cache._db.execute("SELECT id, description FROM items WHERE description IS NOT NULL")
-    uncached: list[tuple[int, str, str]] = []  # (att_id, file_name, url)
-    seen_ids: set[int] = set()
-    async for row in rows:
-        item_id, desc = row
-        if not desc:
-            continue
-        for m in pattern.finditer(desc):
-            att_id = int(m.group(1))
-            if att_id in seen_ids:
-                continue
-            file_name = m.group(2) or f"attachment_{att_id}"
-            cache_dir = Path(os.path.expanduser(CACHE_DIR)) / "attachments" / str(att_id)
-            if cache_dir.exists() and list(cache_dir.glob("*")):
-                continue
-            original_url = m.group(0)
-            if not original_url.startswith("http"):
-                original_url = f"https://enphase.jamacloud.com{original_url}"
-            uncached.append((att_id, file_name, original_url))
-            seen_ids.add(att_id)
-
-    if not uncached:
-        return {"status": "done", "downloaded": 0, "failed": 0, "message": "All images already cached"}
-
-    logger.info("Bulk importing %d uncached images with session cookie", len(uncached))
-    ok = 0
-    fail = 0
-    async with httpx.AsyncClient() as http:
-        sem = asyncio.Semaphore(5)
-        async def dl(att_id: int, file_name: str, url: str):
-            nonlocal ok, fail
-            async with sem:
-                try:
-                    r = await http.get(
-                        url,
-                        headers={
-                            "Cookie": _session_cookie,
-                            "Accept": "image/*, */*",
-                            "User-Agent": "jama-mcp-v2/0.2.0",
-                        },
-                        follow_redirects=True,
-                        timeout=30,
-                    )
-                    ct = r.headers.get("content-type", "")
-                    if r.status_code == 200 and len(r.content) > 100 and ("image" in ct or _looks_like_image(r.content)):
-                        d = Path(os.path.expanduser(CACHE_DIR)) / "attachments" / str(att_id)
-                        d.mkdir(parents=True, exist_ok=True)
-                        (d / file_name).write_bytes(r.content)
-                        ok += 1
-                    else:
-                        fail += 1
-                except Exception:
-                    fail += 1
-
-        await asyncio.gather(*(dl(a, f, u) for a, f, u in uncached))
-
-    msg = f"Downloaded {ok}, failed {fail} out of {len(uncached)}"
-    logger.info("Bulk import: %s", msg)
-    return {"status": "done", "downloaded": ok, "failed": fail, "total": len(uncached), "message": msg}
 
 
 # ---------- REST: Sync ----------

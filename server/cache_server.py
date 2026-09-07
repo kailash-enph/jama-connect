@@ -314,10 +314,6 @@ class PasswordBody(BaseModel):
 class SyncBody(BaseModel):
     project_ids: Optional[list[int]] = None
 
-class SessionCookieBody(BaseModel):
-    jsessionid: str   # empty string = clear
-
-
 # ── .env helpers ─────────────────────────────────────────────────────────────
 
 def _read_env() -> dict[str, str]:
@@ -809,27 +805,6 @@ def next_sync_info(_: None = Depends(_require_auth)):
         "schedule_time": cfg.get("schedule_time", "02:00"),
         "next_sync": _next_sync_at.isoformat() if _next_sync_at else None,
     }
-
-
-@app.get("/admin/session-cookie")
-def get_session_cookie(_: None = Depends(_require_auth)):
-    """Return JSESSIONID status — never the value itself."""
-    env = _read_env()
-    val = env.get("JAMA_SESSION_COOKIE", "").strip()
-    return {
-        "set": bool(val),
-        "hint": "Obtain from browser DevTools -> Application -> Cookies -> enphase.jamacloud.com. Expires ~8 h.",
-    }
-
-
-@app.post("/admin/session-cookie")
-def set_session_cookie(body: SessionCookieBody, _: None = Depends(_require_auth)):
-    """Save or clear JAMA_SESSION_COOKIE in .env.  Empty string clears it."""
-    jsid = body.jsessionid.strip()
-    _write_env_key("JAMA_SESSION_COOKIE", jsid)
-    action = "cleared" if not jsid else "saved"
-    logger.info("JSESSIONID %s by admin", action)
-    return {"ok": True, "set": bool(jsid), "message": f"Session cookie {action}"}
 
 
 @app.post("/admin/password")

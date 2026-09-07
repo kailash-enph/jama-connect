@@ -6,7 +6,6 @@ so that services are created exactly once per process.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sys
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
     try:
         from jama_editor.editor_cache import EditorCache
         from jama_editor.schema_sync import SchemaSync
-        from jama_editor.saml_session import JamaWebSession
         from jama_editor.editor_attachments import AttachmentManager as EditorAttachmentManager
     except ImportError:
         pass
@@ -122,7 +120,6 @@ class ServiceRegistry:
         self.search_engine: SearchEngine | None = None
         self.attachment_mgr: AttachmentManager | None = None
         self.progress_bus: ProgressBus | None = None
-        self.session_cookie: str = ""  # Browser JSESSIONID for SAML-protected downloads
 
         # --- New multi-project DB layer ---
         self.cache_manager: CacheManager | None = None  # type: ignore[type-arg]
@@ -132,9 +129,6 @@ class ServiceRegistry:
         self.editor_cache: EditorCache | None = None
         self.schema_sync: SchemaSync | None = None
         self.editor_attachment_mgr: EditorAttachmentManager | None = None
-        self.web_session: JamaWebSession | None = None
-        self.image_cache_dir: str = ""
-        self.prefetch_task: asyncio.Task | None = None
 
         # --- State ---
         self._mcp_initialized = False
@@ -230,7 +224,6 @@ class ServiceRegistry:
 
         from jama_editor.editor_cache import EditorCache
         from jama_editor.schema_sync import SchemaSync
-        from jama_editor.saml_session import JamaWebSession
         from jama_editor.editor_attachments import AttachmentManager as EditorAttachmentManager
 
         self.editor_cache = EditorCache(CACHE_DIR)
@@ -238,15 +231,6 @@ class ServiceRegistry:
 
         self.schema_sync = SchemaSync(self.api_client)
         self.editor_attachment_mgr = EditorAttachmentManager(self.api_client, self.editor_cache, CACHE_DIR)
-
-        self.web_session = JamaWebSession(JAMA_URL, CACHE_DIR)
-        self.image_cache_dir = os.path.join(os.path.expanduser(CACHE_DIR), "image_cache")
-        os.makedirs(self.image_cache_dir, exist_ok=True)
-
-        # Try to load a previously persisted web session
-        self.web_session.load_persisted_session()
-        if self.web_session.is_authenticated:
-            logger.info("Loaded persisted web session for image downloads")
 
         self._editor_initialized = True
         logger.info("Editor services initialized: EditorDB=%s", self.editor_cache.db_path)
@@ -267,10 +251,6 @@ class ServiceRegistry:
         if self.editor_cache:
             await self.editor_cache.close()
             self.editor_cache = None
-        if self.prefetch_task and not self.prefetch_task.done():
-            self.prefetch_task.cancel()
-            self.prefetch_task = None
-        self.web_session = None
         self.schema_sync = None
         self.editor_attachment_mgr = None
         self.sync_engine = None

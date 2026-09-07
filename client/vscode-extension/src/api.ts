@@ -825,31 +825,6 @@ export class EditorApiClient {
     });
   }
 
-  // ---------- Web Session (JSESSIONID for image downloads) ----------
-
-  async setSessionCookie(jsessionid: string): Promise<{ status: string; valid: boolean; message: string }> {
-    return this.request("/api/session/set", {
-      method: "POST",
-      body: JSON.stringify({ jsessionid }),
-    });
-  }
-
-  async sessionStatus(): Promise<{ authenticated: boolean; has_cookie: boolean }> {
-    return this.request("/api/session/status");
-  }
-
-  async clearSession(): Promise<{ status: string }> {
-    return this.request("/api/session/clear", { method: "POST" });
-  }
-
-  async prefetchStatus(): Promise<{ status: string; message: string }> {
-    return this.request("/api/session/prefetch-status");
-  }
-
-  async triggerPrefetch(): Promise<{ status: string; message: string }> {
-    return this.request("/api/session/prefetch", { method: "POST" });
-  }
-
   async clearImageCache(): Promise<{ files_deleted: number; bytes_freed: number }> {
     return this.request("/api/images/cache", { method: "DELETE" });
   }

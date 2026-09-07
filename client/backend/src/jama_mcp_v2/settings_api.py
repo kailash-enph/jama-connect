@@ -180,49 +180,6 @@ async def test_credentials(request: Request):
 
 
 # ============================================================
-# Session (JSESSIONID)
-# ============================================================
-
-@settings_router.get("/session")
-async def get_session_status():
-    """Get JSESSIONID session status."""
-    has = bool(services.session_cookie)
-    # Check editor web session if available
-    ws = services.web_session
-    return {
-        "valid": has or (ws is not None and ws.is_authenticated),
-        "has_cookie": has,
-        "cookie_length": len(services.session_cookie),
-        "web_session_authenticated": ws.is_authenticated if ws else False,
-    }
-
-
-@settings_router.post("/session")
-async def set_session(request: Request):
-    """Set JSESSIONID (replaces /api/session-cookie)."""
-    body = await request.json()
-    cookie = body.get("cookie", "").strip()
-    if not cookie:
-        return JSONResponse(status_code=400, content={"error": "cookie is required"})
-    # Normalize: accept raw JSESSIONID value or full cookie header
-    if "=" not in cookie:
-        cookie = f"JSESSIONID={cookie}"
-    services.session_cookie = cookie
-    logger.info("Session cookie stored via /settings/session (%d chars)", len(cookie))
-    return {"status": "stored", "length": len(cookie)}
-
-
-@settings_router.delete("/session")
-async def clear_session():
-    """Clear session cookie."""
-    services.session_cookie = ""
-    if services.web_session:
-        services.web_session.clear_session()
-    logger.info("Session cleared via /settings/session")
-    return {"status": "cleared"}
-
-
-# ============================================================
 # Projects
 # ============================================================
 
@@ -340,11 +297,6 @@ async def status_stream():
                         os.environ.get("JAMA_CLIENT_ID") and os.environ.get("JAMA_CLIENT_SECRET")
                     ),
                     "source": credential_store.source,
-                },
-                "session": {
-                    "valid": bool(services.session_cookie) or (
-                        services.web_session is not None and services.web_session.is_authenticated
-                    ),
                 },
                 "active_project": {
                     "id": _settings.active_project_id,

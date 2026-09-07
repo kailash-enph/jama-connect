@@ -10,7 +10,6 @@ import {
   Loader2,
   Key,
   FolderTree,
-  Cookie,
   RefreshCw,
   Shield,
   Eye,
@@ -25,14 +24,12 @@ import {
   testCredentials,
   getSettingsProjects,
   selectProject,
-  getSessionStatus,
-  setSession,
   type BackendHealth,
   type CredentialStatus,
   type Project,
 } from "@/lib/api";
 
-const TOTAL_STEPS = 6;
+const TOTAL_STEPS = 5;
 
 export default function SetupWizard() {
   const router = useRouter();
@@ -56,11 +53,6 @@ export default function SetupWizard() {
   // Step 3 (Sync)
   const [syncStarted, setSyncStarted] = useState(false);
   const [syncStatus, setSyncStatus] = useState("Waiting...");
-
-  // Step 4 (Session Cookie)
-  const [sessionCookie, setSessionCookie] = useState("");
-  const [sessionResult, setSessionResult] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [sessionConfigured, setSessionConfigured] = useState(false);
 
   // Backend status
   const [backendOnline, setBackendOnline] = useState(false);
@@ -127,18 +119,6 @@ export default function SetupWizard() {
       setProjectResult({ ok: false, msg: e.message });
     }
     setProjectLoading(false);
-  };
-
-  const handleSetSession = async () => {
-    setSessionResult(null);
-    try {
-      const res = await setSession(sessionCookie);
-      setSessionResult({ ok: true, msg: `Cookie stored (${res.length} chars)` });
-      setSessionConfigured(true);
-      setSessionCookie("");
-    } catch (e: any) {
-      setSessionResult({ ok: false, msg: e.message });
-    }
   };
 
   // ---- Step content ----
@@ -294,46 +274,7 @@ export default function SetupWizard() {
       ),
       canAdvance: true,
     },
-    // Step 4: Session Cookie (optional)
-    {
-      title: "Web Session (Optional)",
-      content: (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2 mb-2">
-            <Cookie className="h-5 w-5 text-orange-600" />
-            <span className="text-sm text-gray-500 dark:text-gray-400">
-              Paste your JSESSIONID cookie to enable downloading SAML-protected images and attachments.
-              This step is optional — you can configure it later from Settings.
-            </span>
-          </div>
-          <input
-            type="text"
-            placeholder="Paste JSESSIONID value or full cookie header"
-            value={sessionCookie}
-            onChange={(e) => setSessionCookie(e.target.value)}
-            className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-mono"
-          />
-          <button
-            onClick={handleSetSession}
-            disabled={!sessionCookie}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Cookie className="h-4 w-4" />
-            Set Cookie
-          </button>
-          {sessionResult && (
-            <ResultBanner ok={sessionResult.ok} msg={sessionResult.msg} />
-          )}
-          {!sessionCookie && !sessionConfigured && (
-            <p className="text-xs text-gray-400">
-              You can skip this step and configure it later.
-            </p>
-          )}
-        </div>
-      ),
-      canAdvance: true, // optional step
-    },
-    // Step 5: Done
+    // Step 4: Done
     {
       title: "Setup Complete!",
       content: (
@@ -345,7 +286,6 @@ export default function SetupWizard() {
           <div className="text-left max-w-sm mx-auto space-y-2 text-sm">
             <SummaryRow ok={credConfigured} label="API Credentials" />
             <SummaryRow ok={!!projectResult?.ok} label={`Project: ${projectName || "(none)"}`} />
-            <SummaryRow ok={sessionConfigured} label="Web Session Cookie" optional />
           </div>
           <button
             onClick={() => router.push("/settings")}

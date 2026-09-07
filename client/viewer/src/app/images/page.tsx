@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { ExternalLink, Upload, CheckCircle2, Loader2, ImageIcon, AlertCircle, Download } from "lucide-react";
+import { ExternalLink, Upload, CheckCircle2, Loader2, ImageIcon, AlertCircle } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
 
@@ -18,9 +18,6 @@ export default function ImagesPage() {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [cached, setCached] = useState<Set<number>>(new Set());
   const [dragOver, setDragOver] = useState(false);
-  const [hasCookie, setHasCookie] = useState(false);
-  const [bulkImporting, setBulkImporting] = useState(false);
-  const [bulkResult, setBulkResult] = useState<string | null>(null);
 
   const fetchUncached = useCallback(async () => {
     setLoading(true);
@@ -37,25 +34,7 @@ export default function ImagesPage() {
 
   useEffect(() => {
     fetchUncached();
-    fetch(`${API_BASE}/api/session-cookie`)
-      .then((r) => r.json())
-      .then((d) => setHasCookie(d.has_cookie))
-      .catch(() => {});
   }, [fetchUncached]);
-
-  const bulkImport = async () => {
-    setBulkImporting(true);
-    setBulkResult(null);
-    try {
-      const resp = await fetch(`${API_BASE}/api/images/bulk-import`, { method: "POST" });
-      const data = await resp.json();
-      setBulkResult(data.message || `Done: ${data.downloaded} downloaded`);
-      fetchUncached();
-    } catch {
-      setBulkResult("Bulk import failed");
-    }
-    setBulkImporting(false);
-  };
 
   const uploadImage = async (attId: number, url: string, file: File) => {
     setUploading((prev) => ({ ...prev, [attId]: true }));
@@ -120,16 +99,6 @@ export default function ImagesPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          {hasCookie && remaining.length > 0 && (
-            <button
-              onClick={bulkImport}
-              disabled={bulkImporting}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 transition-colors"
-            >
-              {bulkImporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-              Bulk Import ({remaining.length})
-            </button>
-          )}
           <button
             onClick={fetchUncached}
             className="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
@@ -161,20 +130,6 @@ export default function ImagesPage() {
             </div>
           )}
 
-          <div className="bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-            <div className="flex items-start gap-2">
-              <AlertCircle className="h-5 w-5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
-              <div className="text-sm text-blue-800 dark:text-blue-200">
-                <strong>Bulk import (recommended for {remaining.length} images):</strong>
-                <ol className="mt-1 ml-4 list-decimal space-y-0.5">
-                  <li>Open <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">enphase.jamacloud.com</code> in your browser and login</li>
-                  <li>Press F12 → Application → Cookies → jamacloud.com</li>
-                  <li>Copy the <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">JSESSIONID</code> cookie value</li>
-                  <li>Run in terminal: <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded text-xs">python scripts/bulk_import_images.py --cookie &quot;JSESSIONID=&lt;value&gt;&quot;</code></li>
-                </ol>
-              </div>
-            </div>
-          </div>
           <div className="bg-yellow-50 dark:bg-yellow-950/30 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-6">
             <div className="flex items-start gap-2">
               <AlertCircle className="h-5 w-5 text-yellow-600 dark:text-yellow-400 shrink-0 mt-0.5" />

@@ -224,7 +224,6 @@ class TestGenerateProject:
                 jama_url="https://test.jamacloud.com",
                 client_id="test_id",
                 client_secret="test_secret",
-                session_cookie=None,
             )
 
         assert meta["id"] == 20570
@@ -263,7 +262,6 @@ class TestGenerateProject:
                 jama_url="https://test.jamacloud.com",
                 client_id="id",
                 client_secret="secret",
-                session_cookie=None,
             )
 
         required_keys = {"id", "name", "last_sync", "item_count", "variants"}

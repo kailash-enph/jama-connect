@@ -6,7 +6,7 @@ Provides REST endpoints for:
   - Lock/unlock (via Jama API pass-through)
   - Push to Jama (version check + PUT + clear drafts)
   - On-demand schema (item types, fields, pick lists, workflows)
-  - Image proxy (SAML web session + REST API fallback)
+  - Image proxy (REST API via OAuth)
   - Health check
 
 When running as part of the unified backend, this module is mounted
@@ -16,7 +16,6 @@ kept for backward compatibility.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -34,7 +33,6 @@ from jama_mcp_v2.services import services, CACHE_DIR as _SVC_CACHE_DIR, REST_POR
 
 from .editor_attachments import AttachmentManager
 from .editor_cache import EditorCache
-from .saml_session import JamaWebSession
 from .schema_sync import SchemaSync
 
 # ---------- Logging ----------
@@ -78,30 +76,10 @@ def _get_schema_sync() -> SchemaSync | None:
 def _get_attachment_mgr() -> AttachmentManager | None:
     return services.editor_attachment_mgr
 
-def _get_web_session() -> JamaWebSession | None:
-    return services.web_session
-
-def _get_image_cache_dir() -> str:
-    return services.image_cache_dir
-
-# Regex matching Jama image URLs in HTML — same as the extension's JAMA_IMG_RE
-# Group 1: REST API attachment/file ID, Group 2: web attachment ID, Group 3: web filename
-_JAMA_IMG_RE = re.compile(
-    r'https?://[^"\'\s]*?/(?:rest/v1/(?:attachments|files)/(\d+)(?:/file)?|attachment/(\d+)/([^"\'\s\\]+))',
-    re.IGNORECASE,
-)
-
 
 async def _init_editor_services() -> None:
     """Initialize editor services via the shared ServiceRegistry."""
     await services.init_editor_services()
-    # Kick off background image prefetch if web session is valid
-    ws = services.web_session
-    if ws and ws.is_authenticated:
-        logger.info("Loaded persisted web session — prefetching images")
-        services.prefetch_task = asyncio.create_task(_prefetch_all_images())
-    else:
-        logger.info("No valid web session — use 'Jama: Set Session Cookie' to set JSESSIONID")
     logger.info("Editor services initialized (port=%d)", EDITOR_PORT)
 
 
@@ -608,109 +586,7 @@ def _guess_image_mime(content: bytes) -> str:
 
 def _image_cache_path(attachment_id: int) -> str:
     """Return the on-disk cache path for an image."""
-    return os.path.join(services.image_cache_dir, str(attachment_id))
-
-
-async def _prefetch_all_images() -> None:
-    """Background task: scan MCP cache DB for image URLs and download them all.
-
-    Scans `items.description` and `items.fields_json` in the MCP cache DB for
-    Jama image attachment URLs, then downloads any that aren't already cached
-    to disk using the web session cookie + REST API.
-    """
-    import aiosqlite
-
-    cache_db = os.path.join(os.path.expanduser(CACHE_DIR), "cache.db")
-    if not os.path.exists(cache_db):
-        logger.info("Image prefetch: MCP cache DB not found at %s, skipping", cache_db)
-        return
-
-    # Collect all unique attachment IDs and their filenames from item HTML
-    # Map: attachment_id -> filename (from URL, or empty string)
-    attachment_map: dict[int, str] = {}
-    try:
-        async with aiosqlite.connect(cache_db) as db:
-            # Scan item descriptions and custom fields
-            async with db.execute("SELECT description, fields_json FROM items") as cursor:
-                async for row in cursor:
-                    for text in (row[0] or "", row[1] or ""):
-                        for m in _JAMA_IMG_RE.finditer(text):
-                            aid = int(m.group(1) or m.group(2))
-                            fname = (m.group(3) or "").strip()
-                            if aid not in attachment_map or fname:
-                                attachment_map[aid] = fname
-
-            # Scan test run actual_results and fields (often contain pasted screenshots)
-            try:
-                async with db.execute("SELECT actual_results, fields_json FROM test_runs") as cursor:
-                    async for row in cursor:
-                        for text in (row[0] or "", row[1] or ""):
-                            for m in _JAMA_IMG_RE.finditer(text):
-                                aid = int(m.group(1) or m.group(2))
-                                fname = (m.group(3) or "").strip()
-                                if aid not in attachment_map or fname:
-                                    attachment_map[aid] = fname
-            except Exception:
-                pass  # test_runs table may not exist yet
-    except Exception as e:
-        logger.error("Image prefetch: failed to scan cache DB: %s", e)
-        return
-
-    if not attachment_map:
-        logger.info("Image prefetch: no image URLs found in cached items")
-        return
-
-    # Filter out already-cached images
-    uncached = [(aid, fn) for aid, fn in attachment_map.items() if not os.path.exists(_image_cache_path(aid))]
-    logger.info(
-        "Image prefetch: found %d image IDs, %d already cached, %d to download",
-        len(attachment_map), len(attachment_map) - len(uncached), len(uncached),
-    )
-
-    if not uncached:
-        return
-
-    downloaded = 0
-    failed = 0
-    for aid, fname in uncached:
-        ws = services.web_session
-        if not (ws and ws.is_authenticated):
-            logger.warning("Image prefetch: web session expired mid-prefetch, stopping")
-            break
-        try:
-            file_bytes: bytes | None = None
-
-            # Try web session first (most inline images need this)
-            file_bytes = await ws.download_web_image(aid, fname)
-
-            # Fall back to REST API
-            ac = services.api_client
-            if not file_bytes and ac:
-                try:
-                    file_bytes = await ac.download_attachment(aid)
-                except Exception:
-                    pass
-            if not file_bytes and ac:
-                try:
-                    file_bytes = await ac.download_file(aid)
-                except Exception:
-                    pass
-
-            if file_bytes:
-                with open(_image_cache_path(aid), "wb") as f:
-                    f.write(file_bytes)
-                downloaded += 1
-            else:
-                failed += 1
-
-            # Small delay to avoid hammering the server
-            await asyncio.sleep(0.2)
-
-        except Exception as e:
-            logger.debug("Image prefetch: failed to download %d: %s", aid, e)
-            failed += 1
-
-    logger.info("Image prefetch complete: %d downloaded, %d failed", downloaded, failed)
+    return os.path.join(os.path.expanduser(_SVC_CACHE_DIR), "image_cache", str(attachment_id))
 
 
 @editor_app.get("/api/proxy/image/{attachment_id}")
@@ -719,9 +595,8 @@ async def proxy_image(attachment_id: int) -> Any:
 
     Tries (in order):
     1. Local disk cache (instant, no network)
-    2. SAML web session: /attachment/{id} (for pasted inline images)
-    3. REST API: /rest/v1/attachments/{id}/file (OAuth)
-    4. REST API: /rest/v1/files/{id} (OAuth)
+    2. REST API: /rest/v1/attachments/{id}/file (OAuth)
+    3. REST API: /rest/v1/files/{id} (OAuth)
     """
     from fastapi.responses import Response
 
@@ -740,15 +615,7 @@ async def proxy_image(attachment_id: int) -> Any:
     source = "unknown"
 
     try:
-        # 2. Web session cookie (inline pasted images — most common)
-        ws = services.web_session
-        if ws and ws.is_authenticated:
-            file_bytes = await ws.download_web_image(attachment_id)
-            if file_bytes:
-                source = "web-session"
-                logger.debug("Image %d downloaded via web session (%d bytes)", attachment_id, len(file_bytes))
-
-        # 3. REST API attachment endpoint (OAuth)
+        # 2. REST API attachment endpoint (OAuth)
         if not file_bytes:
             client = _api()
             try:
@@ -759,7 +626,7 @@ async def proxy_image(attachment_id: int) -> Any:
             except Exception as e:
                 logger.debug("REST attachment %d failed: %s", attachment_id, e)
 
-        # 4. REST API files endpoint (OAuth)
+        # 3. REST API files endpoint (OAuth)
         if not file_bytes:
             client = _api()
             try:
@@ -770,10 +637,7 @@ async def proxy_image(attachment_id: int) -> Any:
                 logger.debug("REST files %d failed: %s", attachment_id, e)
 
         if not file_bytes:
-            detail = "Attachment not found."
-            if not (services.web_session and services.web_session.is_authenticated):
-                detail += " No web session — use 'Jama: Set Session Cookie' command to provide JSESSIONID for web UI images."
-            raise HTTPException(status_code=404, detail=detail)
+            raise HTTPException(status_code=404, detail="Attachment not found.")
 
         # Cache to disk for future requests
         try:
@@ -798,90 +662,10 @@ async def proxy_image(attachment_id: int) -> Any:
         raise HTTPException(status_code=502, detail=f"Failed to proxy image: {exc}")
 
 
-# ============================================================
-# WEB SESSION ENDPOINTS (JSESSIONID for image downloads)
-# ============================================================
-
-
-class SetSessionRequest(BaseModel):
-    jsessionid: str
-
-
-@editor_app.post("/api/session/set")
-async def set_session(req: SetSessionRequest) -> dict[str, Any]:
-    """Set the JSESSIONID cookie for web UI image downloads.
-
-    User copies this from browser DevTools:
-    F12 → Application → Cookies → enphase.jamacloud.com → JSESSIONID
-    """
-    ws = services.web_session
-    if not ws:
-        raise HTTPException(status_code=500, detail="Web session manager not initialized")
-
-    ws.set_jsessionid(req.jsessionid)
-
-    valid = await ws.validate()
-    if valid:
-        # Kick off background prefetch of all images from cached items
-        if services.prefetch_task and not services.prefetch_task.done():
-            services.prefetch_task.cancel()
-        services.prefetch_task = asyncio.create_task(_prefetch_all_images())
-        return {"status": "authenticated", "valid": True, "message": "Session cookie is valid — downloading images in background."}
-    else:
-        return {"status": "set", "valid": False, "message": "Cookie was saved but could not be validated. Images may not load."}
-
-
-@editor_app.get("/api/session/status")
-async def session_status() -> dict[str, Any]:
-    """Check web session status."""
-    ws = services.web_session
-    if not ws:
-        return {"authenticated": False}
-    return {
-        "authenticated": ws.is_authenticated,
-        "has_cookie": bool(ws.cookies.get("JSESSIONID")),
-    }
-
-
-@editor_app.post("/api/session/clear")
-async def session_clear() -> dict[str, str]:
-    """Clear the web session cookie."""
-    ws = services.web_session
-    if ws:
-        await ws.invalidate()
-    return {"status": "cleared"}
-
-
-@editor_app.get("/api/session/prefetch-status")
-async def prefetch_status() -> dict[str, Any]:
-    """Check image prefetch progress."""
-    pt = services.prefetch_task
-    if pt is None:
-        return {"status": "idle", "message": "No prefetch has been started"}
-    if pt.done():
-        exc = pt.exception() if not pt.cancelled() else None
-        if exc:
-            return {"status": "error", "message": str(exc)}
-        return {"status": "complete", "message": "All images prefetched"}
-    return {"status": "running", "message": "Downloading images in background..."}
-
-
-@editor_app.post("/api/session/prefetch")
-async def trigger_prefetch() -> dict[str, Any]:
-    """Manually trigger background image prefetch."""
-    ws = services.web_session
-    if not ws or not ws.is_authenticated:
-        raise HTTPException(status_code=400, detail="No valid web session. Set JSESSIONID first.")
-    if services.prefetch_task and not services.prefetch_task.done():
-        return {"status": "already_running", "message": "Prefetch is already in progress."}
-    services.prefetch_task = asyncio.create_task(_prefetch_all_images())
-    return {"status": "started", "message": "Image prefetch started in background."}
-
-
 @editor_app.delete("/api/images/cache")
 async def clear_image_cache() -> dict[str, Any]:
     """Clear all cached images from disk."""
-    icd = services.image_cache_dir
+    icd = os.path.join(os.path.expanduser(_SVC_CACHE_DIR), "image_cache")
     if not icd or not os.path.exists(icd):
         return {"files_deleted": 0, "bytes_freed": 0}
     files_deleted = 0

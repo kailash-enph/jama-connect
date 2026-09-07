@@ -84,10 +84,9 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
   private async _fetchAll(): Promise<void> {
     const base = getApiBaseUrl();
     try {
-      const [health, creds, session, projects, cache] = await Promise.allSettled([
+      const [health, creds, projects, cache] = await Promise.allSettled([
         this._apiFetch(`${base}/api/health`),
         this._apiFetch(`${base}/settings/credentials`),
-        this._apiFetch(`${base}/settings/session`),
         this._apiFetch(`${base}/settings/projects`),
         this._apiFetch(`${base}/api/stats`),
       ]);
@@ -96,12 +95,11 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
         type: "state",
         health: health.status === "fulfilled" ? health.value : null,
         credentials: creds.status === "fulfilled" ? creds.value : null,
-        session: session.status === "fulfilled" ? session.value : null,
         projects: projects.status === "fulfilled" ? projects.value : null,
         cache: cache.status === "fulfilled" ? cache.value : null,
       });
     } catch {
-      this._postMessage({ type: "state", health: null, credentials: null, session: null, projects: null, cache: null });
+      this._postMessage({ type: "state", health: null, credentials: null, projects: null, cache: null });
     }
   }
 
@@ -139,22 +137,6 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
       case "clearCredentials":
         await this._apiFetch(`${base}/settings/credentials`, { method: "DELETE" });
         this._postMessage({ type: "credResult", success: true, text: "Credentials cleared" });
-        await this._fetchAll();
-        break;
-
-      case "setSession": {
-        const result = await this._apiFetch(`${base}/settings/session`, {
-          method: "POST",
-          body: JSON.stringify({ cookie: msg.cookie }),
-        });
-        this._postMessage({ type: "sessionResult", success: true, text: "Session cookie saved", data: result });
-        await this._fetchAll();
-        break;
-      }
-
-      case "clearSession":
-        await this._apiFetch(`${base}/settings/session`, { method: "DELETE" });
-        this._postMessage({ type: "sessionResult", success: true, text: "Session cleared" });
         await this._fetchAll();
         break;
 
@@ -280,9 +262,7 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
     <vscode-panel-tab id="tab-status">Status</vscode-panel-tab>
     <!-- TAB 2: Credentials -->
     <vscode-panel-tab id="tab-creds">Credentials</vscode-panel-tab>
-    <!-- TAB 3: Session -->
-    <vscode-panel-tab id="tab-session">Session</vscode-panel-tab>
-    <!-- TAB 4: Cache Server -->
+    <!-- TAB 3: Cache Server -->
     <vscode-panel-tab id="tab-cache">Cache Server</vscode-panel-tab>
 
     <!-- VIEW 1: Status -->
@@ -338,23 +318,7 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
       </div>
     </vscode-panel-view>
 
-    <!-- VIEW 3: Session -->
-    <vscode-panel-view id="view-session">
-      <div style="width:100%">
-        <div class="row">
-          <span class="dot" id="sessDot"></span>
-          <span id="sessStatus">Checking...</span>
-        </div>
-        <vscode-text-field id="sessInput" placeholder="Paste JSESSIONID value..." type="password">JSESSIONID</vscode-text-field>
-        <div class="btn-row">
-          <vscode-button onclick="saveSession()">Save</vscode-button>
-          <vscode-button appearance="secondary" onclick="send({type:'clearSession'})">Clear</vscode-button>
-        </div>
-        <div id="sessMsg" class="msg" style="display:none"></div>
-      </div>
-    </vscode-panel-view>
-
-    <!-- VIEW 4: Cache Server -->
+    <!-- VIEW 3: Cache Server -->
     <vscode-panel-view id="view-cache">
       <div style="width:100%">
         <vscode-text-field id="cacheServerUrl" placeholder="http://server-ip:8866">Cache Server URL</vscode-text-field>
@@ -382,13 +346,6 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
       if (!clientId || !clientSecret) return;
       document.getElementById('credSaveBtn').disabled = true;
       send({ type: 'setCredentials', clientId, clientSecret });
-    }
-
-    function saveSession() {
-      const sessEl = document.getElementById('sessInput');
-      const cookie = (sessEl.value || '').trim();
-      if (!cookie) return;
-      send({ type: 'setSession', cookie });
     }
 
     function setProject() {
@@ -462,18 +419,6 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
           credStat.textContent = 'Unknown';
         }
 
-        // Session
-        const sessDot = document.getElementById('sessDot');
-        const sessStat = document.getElementById('sessStatus');
-        if (msg.session) {
-          const has = msg.session.has_cookie || msg.session.valid;
-          sessDot.className = 'dot ' + (has ? 'green' : 'red');
-          sessStat.textContent = has ? 'Cookie stored' : 'Not set';
-        } else {
-          sessDot.className = 'dot red';
-          sessStat.textContent = 'Unknown';
-        }
-
         // Projects (vscode-dropdown)
         const projSel = document.getElementById('projectSelect');
         if (msg.projects && Array.isArray(msg.projects.projects || msg.projects)) {
@@ -516,14 +461,6 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
           const clientSecretEl = document.getElementById('clientSecret');
           if (clientIdEl) clientIdEl.value = '';
           if (clientSecretEl) clientSecretEl.value = '';
-        }
-      }
-
-      if (msg.type === 'sessionResult') {
-        showMsg('sessMsg', msg.text, msg.success);
-        if (msg.success) {
-          const sessEl = document.getElementById('sessInput');
-          if (sessEl) sessEl.value = '';
         }
       }
 

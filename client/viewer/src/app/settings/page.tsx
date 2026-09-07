@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import {
   Shield,
   Key,
-  Cookie,
   FolderTree,
   Server,
   Database,
@@ -28,9 +27,6 @@ import {
   setCredentials,
   clearCredentials,
   testCredentials,
-  getSessionStatus,
-  setSession,
-  clearSession,
   getSettingsProjects,
   selectProject,
   restartServer,
@@ -43,7 +39,6 @@ import {
   pingCacheServer,
   type BackendHealth,
   type CredentialStatus,
-  type SessionStatus,
   type CacheStats,
   type Project,
   type ProjectDbInfo,
@@ -67,7 +62,6 @@ export default function SettingsPage() {
   const router = useRouter();
   const [health, setHealth] = useState<BackendHealth | null>(null);
   const [credStatus, setCredStatus] = useState<CredentialStatus | null>(null);
-  const [sessionStatus, setSessionStatus] = useState<SessionStatus | null>(null);
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState("");
@@ -80,10 +74,6 @@ export default function SettingsPage() {
   const [showSecret, setShowSecret] = useState(false);
   const [credMsg, setCredMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [credLoading, setCredLoading] = useState(false);
-
-  // Session form
-  const [sessionCookie, setSessionCookie] = useState("");
-  const [sessionMsg, setSessionMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   // Project selection
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
@@ -105,15 +95,13 @@ export default function SettingsPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [h, c, s, cs] = await Promise.all([
+      const [h, c, cs] = await Promise.all([
         getBackendHealth().catch(() => null),
         getCredentialStatus().catch(() => null),
-        getSessionStatus().catch(() => null),
         getCacheStats().catch(() => null),
       ]);
       setHealth(h);
       setCredStatus(c);
-      setSessionStatus(s);
       setCacheStats(cs);
       setError("");
 
@@ -206,28 +194,6 @@ export default function SettingsPage() {
       await refresh();
     } catch (e: any) {
       setCredMsg({ type: "error", text: e.message });
-    }
-  };
-
-  const handleSetSession = async () => {
-    setSessionMsg(null);
-    try {
-      const res = await setSession(sessionCookie);
-      setSessionMsg({ type: "success", text: `Cookie stored (${res.length} chars)` });
-      setSessionCookie("");
-      await refresh();
-    } catch (e: any) {
-      setSessionMsg({ type: "error", text: e.message });
-    }
-  };
-
-  const handleClearSession = async () => {
-    try {
-      await clearSession();
-      setSessionMsg({ type: "success", text: "Session cleared" });
-      await refresh();
-    } catch (e: any) {
-      setSessionMsg({ type: "error", text: e.message });
     }
   };
 
@@ -438,49 +404,6 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 {credMsg && <Msg msg={credMsg} />}
-              </div>
-            )}
-          </Card>
-
-          {/* ---- Session Cookie Card ---- */}
-          <Card title="Web Session (JSESSIONID)" icon={<Cookie className="h-5 w-5 text-orange-600" />}>
-            {sessionStatus && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <StatusDot ok={sessionStatus.valid} />
-                  <span className="text-sm">
-                    {sessionStatus.valid
-                      ? `Session active (${sessionStatus.cookie_length} chars)`
-                      : "No valid session"}
-                  </span>
-                </div>
-                <p className="text-xs text-gray-400">
-                  Required for downloading SAML-protected attachments and images from Jama.
-                </p>
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    placeholder="Paste JSESSIONID value or full cookie header"
-                    value={sessionCookie}
-                    onChange={(e) => setSessionCookie(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-mono"
-                  />
-                  <div className="flex gap-2">
-                    <ActionBtn
-                      icon={<Cookie className="h-3.5 w-3.5" />}
-                      label="Set Cookie"
-                      onClick={handleSetSession}
-                      disabled={!sessionCookie}
-                    />
-                    <ActionBtn
-                      icon={<Trash2 className="h-3.5 w-3.5" />}
-                      label="Clear"
-                      onClick={handleClearSession}
-                      variant="danger"
-                    />
-                  </div>
-                </div>
-                {sessionMsg && <Msg msg={sessionMsg} />}
               </div>
             )}
           </Card>

@@ -97,12 +97,6 @@
         "category": "Jama"
       },
       {
-        "command": "jamaEditor.setSessionCookie",
-        "title": "Set SAML Session Cookie (for Images)",
-        "icon": "$(key)",
-        "category": "Jama"
-      },
-      {
         "command": "jamaEditor.uploadAttachment",
         "title": "Upload Attachment to Item",
         "icon": "$(cloud-upload)",
@@ -130,18 +124,6 @@
         "command": "jamaEditor.incrementalSync",
         "title": "Sync Project (Incremental)",
         "icon": "$(sync)",
-        "category": "Jama"
-      },
-      {
-        "command": "jamaEditor.prefetchImages",
-        "title": "Prefetch All Images",
-        "icon": "$(file-media)",
-        "category": "Jama"
-      },
-      {
-        "command": "jamaEditor.sessionStatus",
-        "title": "Show Session & Image Status",
-        "icon": "$(info)",
         "category": "Jama"
       },
       {
