@@ -412,30 +412,38 @@ def _write_index_html(out_dir: Path) -> None:
     --border:#d0d7de; --bg:#f6f8fa; --card:#ffffff;
     --radius:8px; --shadow:0 1px 4px rgba(0,0,0,.1);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --blue:#4a9eff; --blue-light:#1a2d4a; --blue-dark:#5aaeff;
-      --green:#3fb950; --amber:#e3b341; --red:#f85149; --gray:#8b949e;
-      --border:#30363d; --bg:#0d1117; --card:#161b22;
-      --shadow:0 1px 4px rgba(0,0,0,.4);
-    }
-    body{color:#e6edf3}
-    th{color:#8b949e}
-    tr:hover td{background:#1f2937}
-    .section-div span{color:#e6edf3}
-    .section-div::before{background:linear-gradient(to right,#4a9eff,#30363d)}
-    .section-div::after{background:linear-gradient(to left,#4a9eff,#30363d)}
-    input[type=text],input[type=number],input[type=password],input[type=time]{
-      background:#0d1117;color:#e6edf3;border-color:#30363d}
-    kbd{background:#21262d!important;border-color:#30363d!important;color:#c9d1d9}
-    .pill-green{background:#0f2a1a}
-    .pill-amber{background:#2e2000}
-    .pill-red{background:#2a0f0f}
-    .pill-blue{background:#1a2d4a}
-    .sched-card{border-color:#30363d}
-    .sched-card:hover,.sched-card.active{border-color:#4a9eff;background:#1a2d4a}
-    .add-form,.pw-form{background:#0d1117;border-color:#30363d}
+  /* ── Dark mode — applied via JS (class on <html>) so user can toggle ── */
+  html.dark {
+    --blue:#4a9eff; --blue-light:#1a2d4a; --blue-dark:#5aaeff;
+    --green:#3fb950; --amber:#e3b341; --red:#f85149; --gray:#8b949e;
+    --border:#30363d; --bg:#0d1117; --card:#161b22;
+    --shadow:0 1px 4px rgba(0,0,0,.4);
   }
+  html.dark body{color:#e6edf3}
+  html.dark th{color:#8b949e}
+  html.dark tr:hover td{background:#1f2937}
+  html.dark .section-div span{color:#e6edf3}
+  html.dark .section-div::before{background:linear-gradient(to right,#4a9eff,#30363d)}
+  html.dark .section-div::after{background:linear-gradient(to left,#4a9eff,#30363d)}
+  html.dark input[type=text],html.dark input[type=number],
+  html.dark input[type=password],html.dark input[type=time]{
+    background:#0d1117;color:#e6edf3;border-color:#30363d}
+  html.dark kbd{background:#21262d!important;border-color:#30363d!important;color:#c9d1d9}
+  html.dark .pill-green{background:#0f2a1a}
+  html.dark .pill-amber{background:#2e2000}
+  html.dark .pill-red{background:#2a0f0f}
+  html.dark .pill-blue{background:#1a2d4a}
+  html.dark .sched-card{border-color:#30363d}
+  html.dark .sched-card:hover,html.dark .sched-card.active{border-color:#4a9eff;background:#1a2d4a}
+  html.dark .add-form,html.dark .pw-form{background:#0d1117;border-color:#30363d}
+  /* ── Theme toggle widget ── */
+  .theme-toggle{display:flex;align-items:center;gap:2px;
+    background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:2px}
+  .theme-btn{padding:3px 9px;border-radius:4px;border:none;cursor:pointer;
+    font-size:.78rem;background:transparent;color:var(--gray);transition:all .15s;
+    display:flex;align-items:center;gap:4px;white-space:nowrap}
+  .theme-btn.active{background:var(--card);color:var(--blue);
+    font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.12)}
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
        background:var(--bg);color:#24292f;line-height:1.5;padding:24px}
@@ -556,6 +564,12 @@ def _write_index_html(out_dir: Path) -> None:
   /* pub error */
   #pub-err{display:none;margin-bottom:16px}
 </style>
+<!-- Inline theme init — runs before paint to prevent flash of wrong theme -->
+<script>(function(){
+  var t=localStorage.getItem('jama-theme')||'system';
+  var dark=(t==='dark')||(t==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);
+  if(dark) document.documentElement.classList.add('dark');
+})();</script>
 </head>
 <body>
 
@@ -570,6 +584,21 @@ def _write_index_html(out_dir: Path) -> None:
   <h1>Jama Connect Cache Server</h1>
   <span class="badge">LAN</span>
   <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+    <!-- Light / System / Dark toggle -->
+    <div class="theme-toggle">
+      <button class="theme-btn" id="tb-light"  onclick="setTheme('light')"  title="Light theme">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        Light
+      </button>
+      <button class="theme-btn" id="tb-system" onclick="setTheme('system')" title="Use system setting">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        System
+      </button>
+      <button class="theme-btn" id="tb-dark"   onclick="setTheme('dark')"   title="Dark theme">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        Dark
+      </button>
+    </div>
     <span id="admin-user" style="display:none;font-size:.82rem;color:var(--gray)">Admin</span>
     <button id="admin-btn" class="btn btn-secondary btn-sm" onclick="showLogin()" style="display:none">
       &#128274; Admin
@@ -1256,6 +1285,27 @@ async function doChangePw() {
     setTimeout(doLogout, 2000);
   } catch(e) { showAlert('pw-result', e.message, 'err'); }
 }
+
+// ── theme ─────────────────────────────────────────────────────────────────
+const _sysMQ = window.matchMedia('(prefers-color-scheme: dark)');
+function applyTheme(t) {
+  const isDark = t === 'dark' || (t === 'system' && _sysMQ.matches);
+  document.documentElement.classList.toggle('dark', isDark);
+  ['light','system','dark'].forEach(k => {
+    const btn = document.getElementById('tb-' + k);
+    if (btn) btn.classList.toggle('active', k === t);
+  });
+}
+function setTheme(t) {
+  localStorage.setItem('jama-theme', t);
+  applyTheme(t);
+}
+_sysMQ.addEventListener('change', () => {
+  const t = localStorage.getItem('jama-theme') || 'system';
+  if (t === 'system') applyTheme('system');
+});
+// Apply saved preference (FOUC already prevented by inline <script> in <head>)
+applyTheme(localStorage.getItem('jama-theme') || 'system');
 
 // ── init ──────────────────────────────────────────────────────────────────
 loadPublic();
