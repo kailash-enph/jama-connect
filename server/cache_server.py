@@ -21,12 +21,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import gzip
 import hashlib
 import json
 import logging
 import os
+import re
 import secrets
+import shutil
+import sqlite3
 import sys
+import tempfile
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -348,6 +355,186 @@ def _write_env_key(key: str, value: str) -> None:
     logger.info(".env updated: %s=%s", key, "***" if "SECRET" in key or "COOKIE" in key else value)
 
 
+# ── browser image sync helpers ───────────────────────────────────────────────
+
+# Matches browser-pasted attachment URLs: /attachment/{id}/{filename}
+_WEB_IMG_RE = re.compile(r'/attachment/(\d+)/([^"\'<>\s\\]+)')
+_upload_tokens: dict[str, datetime] = {}   # token -> expiry (30 min)
+UPLOAD_TOKEN_TTL = timedelta(minutes=30)
+
+
+def _scan_project_for_images(project_id: int) -> list[dict]:
+    """Scan the project data_only DB for web-pasted attachment URLs.
+
+    Returns list of {att_id, fname} dicts — deduplicated by attachment ID.
+    """
+    db_gz = _DATA_DIR / "projects" / f"{project_id}.db.gz"
+    if not db_gz.exists():
+        return []
+
+    tmp = Path(tempfile.mktemp(suffix=".db"))
+    try:
+        with gzip.open(db_gz, "rb") as gz_in, open(tmp, "wb") as f_out:
+            shutil.copyfileobj(gz_in, f_out)
+
+        seen: dict[int, str] = {}
+        conn = sqlite3.connect(str(tmp))
+        try:
+            for col in ("description", "fields_json"):
+                try:
+                    for (text,) in conn.execute(
+                        f"SELECT {col} FROM items WHERE {col} IS NOT NULL AND {col} != ''"
+                    ):
+                        for m in _WEB_IMG_RE.finditer(text or ""):
+                            att_id = int(m.group(1))
+                            if att_id not in seen:
+                                seen[att_id] = m.group(2)
+                except sqlite3.OperationalError:
+                    pass  # column might not exist in older schemas
+        finally:
+            conn.close()
+        return [{"att_id": att_id, "fname": fname} for att_id, fname in seen.items()]
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _store_images_in_db(project_id: int, images: list[dict]) -> int:
+    """Insert browser-fetched image blobs into the _with_images.db.gz file.
+
+    Falls back to data_only DB if _with_images does not exist yet.
+    Returns the number of images stored.
+    """
+    with_gz = _DATA_DIR / "projects" / f"{project_id}_with_images.db.gz"
+    data_gz = _DATA_DIR / "projects" / f"{project_id}.db.gz"
+    src_gz = with_gz if with_gz.exists() else data_gz
+    if not src_gz.exists():
+        raise FileNotFoundError(f"No DB found for project {project_id} — run a sync first")
+
+    tmp = Path(tempfile.mktemp(suffix=".db"))
+    try:
+        with gzip.open(src_gz, "rb") as gz_in, open(tmp, "wb") as f_out:
+            shutil.copyfileobj(gz_in, f_out)
+
+        conn = sqlite3.connect(str(tmp))
+        count = 0
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS images (
+                    attachment_id INTEGER PRIMARY KEY,
+                    file_name     TEXT    NOT NULL DEFAULT '',
+                    mime_type     TEXT    NOT NULL DEFAULT 'image/png',
+                    data          BLOB    NOT NULL,
+                    size_bytes    INTEGER NOT NULL DEFAULT 0,
+                    cached_at     REAL    NOT NULL DEFAULT 0
+                )
+            """)
+            for img in images:
+                raw = base64.b64decode(img["data_b64"])
+                conn.execute(
+                    """INSERT INTO images(attachment_id,file_name,mime_type,data,size_bytes,cached_at)
+                       VALUES(?,?,?,?,?,?)
+                       ON CONFLICT(attachment_id) DO UPDATE SET
+                         mime_type=excluded.mime_type, data=excluded.data,
+                         size_bytes=excluded.size_bytes, cached_at=excluded.cached_at""",
+                    (
+                        int(img["att_id"]),
+                        img.get("fname", "image.png"),
+                        img.get("mime", "image/png"),
+                        raw, len(raw), time.time(),
+                    ),
+                )
+                count += 1
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Recompress as _with_images.db.gz
+        with open(tmp, "rb") as f_in, gzip.open(with_gz, "wb", compresslevel=6) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        return count
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _make_upload_token() -> str:
+    token = secrets.token_hex(20)
+    _upload_tokens[token] = datetime.now(timezone.utc) + UPLOAD_TOKEN_TTL
+    return token
+
+
+def _validate_upload_token(token: str) -> bool:
+    exp = _upload_tokens.get(token)
+    if not exp:
+        return False
+    if datetime.now(timezone.utc) > exp:
+        _upload_tokens.pop(token, None)
+        return False
+    return True
+
+
+def _generate_browser_script(
+    project_id: int,
+    images: list[dict],
+    server_url: str,
+    token: str,
+    jama_url: str,
+) -> str:
+    images_json = json.dumps(images)
+    n = len(images)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"""// Jama Browser Image Sync — {n} image(s) for project {project_id}
+// Generated: {ts}  |  Token expires in 30 minutes
+// Paste into DevTools console on {jama_url} (must be logged in)
+(async () => {{
+  const SERVER = '{server_url}';
+  const TOKEN  = '{token}';
+  const PID    = {project_id};
+  const IMGS   = {images_json};
+
+  const style = (bg, fg='#fff') => `background:${{bg}};color:${{fg}};padding:2px 6px;border-radius:3px;font-weight:bold`;
+  console.log('%c Jama Image Sync ', style('#0066cc'), `Fetching ${{IMGS.length}} image(s) for project ${{PID}}...`);
+
+  const results = []; let ok = 0, fail = 0, skip = 0;
+
+  for (const {{att_id, fname}} of IMGS) {{
+    const url = `/attachment/${{att_id}}/${{fname}}`;
+    try {{
+      const r = await fetch(url);
+      if (r.status === 403 || r.status === 404) {{ skip++; continue; }}
+      if (!r.ok) {{ console.warn(`HTTP ${{r.status}} — ${{url}}`); fail++; continue; }}
+      const blob = await r.blob();
+      const b64  = await new Promise(res => {{
+        const fr = new FileReader();
+        fr.onload  = () => res(fr.result.split(',')[1]);
+        fr.readAsDataURL(blob);
+      }});
+      results.push({{ att_id, fname, mime: blob.type || 'image/png', data_b64: b64 }});
+      ok++;
+      if (ok % 5 === 0) console.log(`  ... ${{ok}}/${{IMGS.length}} fetched`);
+    }} catch(e) {{ console.error(`Error — ${{url}}:`, e); fail++; }}
+  }}
+
+  console.log(`Fetch done: ${{ok}} ok, ${{fail}} failed, ${{skip}} not found.`);
+  if (!results.length) {{ console.warn('Nothing to upload.'); return; }}
+
+  console.log(`Uploading ${{results.length}} image(s) to cache server...`);
+  try {{
+    const r = await fetch(`${{SERVER}}/admin/image-sync/upload?token=${{TOKEN}}`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{ project_id: PID, images: results }})
+    }});
+    if (!r.ok) {{
+      const e = await r.json().catch(() => ({{detail: r.statusText}}));
+      throw new Error(e.detail || r.statusText);
+    }}
+    const d = await r.json();
+    console.log('%c Done ', style('#1a7f37'), d.message);
+  }} catch(e) {{ console.error('Upload failed:', e.message); }}
+}})();
+"""
+
+
 # ── admin API ─────────────────────────────────────────────────────────────────
 
 @app.get("/admin/auth-check")
@@ -604,6 +791,115 @@ def change_password(body: PasswordBody, request: Request, response: Response, _:
     _sessions.clear()                           # invalidate all sessions
     response.delete_cookie("admin_token")
     return {"ok": True, "message": "Password changed — please log in again"}
+
+
+# ── browser image sync endpoints ─────────────────────────────────────────────
+
+def _cors_headers() -> dict[str, str]:
+    """CORS headers that allow any origin for the token-protected upload endpoint.
+
+    Since auth is via a short-lived single-use token (not a session cookie) we
+    can safely allow * here — the token is required in every request.
+    """
+    return {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+
+
+@app.options("/admin/image-sync/upload")
+async def options_image_upload():
+    """CORS preflight for cross-origin uploads from the Jama browser console."""
+    from fastapi.responses import Response as _Resp
+    return _Resp(status_code=204, headers=_cors_headers())
+
+
+@app.get("/admin/image-sync/script")
+def get_image_sync_script(
+    project_id: int,
+    request: Request,
+    _: None = Depends(_require_auth),
+):
+    """Generate a browser console script for the given project.
+
+    Scans the project DB for web-pasted attachment URLs, issues a 30-minute
+    upload token, and returns a ready-to-paste JavaScript snippet.
+    """
+    images = _scan_project_for_images(project_id)
+    if not images:
+        raise HTTPException(
+            404,
+            f"No web-pasted images found in project {project_id}. "
+            "They may not exist, or the DB hasn't been synced yet.",
+        )
+
+    token = _make_upload_token()
+    env = _read_env()
+    jama_url = env.get("JAMA_URL", "https://enphase.jamacloud.com").rstrip("/")
+
+    # Use the Host header so the script points at the right server address
+    host = request.headers.get("host", "localhost:8866")
+    server_url = f"http://{host}"
+
+    script = _generate_browser_script(project_id, images, server_url, token, jama_url)
+    logger.info(
+        "Image-sync script generated for project %d: %d URLs, token expires %s",
+        project_id, len(images),
+        (_upload_tokens[token]).strftime("%H:%M UTC"),
+    )
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=script, media_type="text/plain")
+
+
+@app.post("/admin/image-sync/upload")
+async def upload_browser_images(request: Request, token: str = ""):
+    """Receive base64-encoded images from the browser console script.
+
+    Auth is via a short-lived upload token (not the admin session cookie) so
+    this endpoint works cross-origin from the Jama page without exposing cookies.
+    Token is single-use — regenerate the script for each upload session.
+    """
+    if not _validate_upload_token(token):
+        raise HTTPException(
+            401,
+            "Invalid or expired upload token. "
+            "Click 'Generate Script' again in the admin panel.",
+            headers=_cors_headers(),
+        )
+
+    body = await request.json()
+    project_id = body.get("project_id")
+    images: list[dict] = body.get("images", [])
+
+    if not project_id:
+        raise HTTPException(400, "project_id required", headers=_cors_headers())
+    if not images:
+        return JSONResponse(
+            {"ok": True, "stored": 0, "message": "No images in payload — nothing stored"},
+            headers=_cors_headers(),
+        )
+
+    # Consume the token (single-use)
+    _upload_tokens.pop(token, None)
+
+    try:
+        count = _store_images_in_db(int(project_id), images)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e), headers=_cors_headers())
+    except Exception as e:
+        logger.error("Image upload error for project %s: %s", project_id, e, exc_info=True)
+        raise HTTPException(500, str(e), headers=_cors_headers())
+
+    logger.info("Stored %d browser images for project %d", count, project_id)
+    return JSONResponse(
+        {
+            "ok": True,
+            "stored": count,
+            "message": f"Stored {count} image(s) in project {project_id} — with_images DB updated",
+        },
+        headers=_cors_headers(),
+    )
 
 
 # ── static file serving ───────────────────────────────────────────────────────

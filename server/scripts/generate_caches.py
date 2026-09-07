@@ -647,6 +647,52 @@ def _write_index_html(out_dir: Path) -> None:
     </div>
   </div>
 
+  <!-- Browser Image Sync -->
+  <div class="card">
+    <div class="card-header">
+      &#128444; Browser Image Sync
+      <div class="hdr-actions">
+        <span style="font-size:.78rem;color:var(--green);font-weight:600">No JSESSIONID stored server-side</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:.85rem;color:var(--gray);margin-bottom:14px">
+        Fetches browser-pasted inline images directly from your logged-in Jama session
+        — no session cookie is ever sent to this server. A short-lived upload token
+        (30 min, single-use) authorises the image upload only.
+      </p>
+      <div class="add-form" style="margin-bottom:12px">
+        <div class="af-field">
+          <label>Project</label>
+          <select id="img-pid"
+                  style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:.88rem;width:100%">
+            <option value="">Select project...</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="genImgScript()">Generate Script</button>
+      </div>
+      <div id="img-result" style="display:none;margin-bottom:10px"></div>
+      <div id="img-script-area" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:.82rem;color:var(--gray)">
+            Paste into <b>DevTools console</b> on <code style="background:var(--bg);padding:1px 4px;border-radius:3px">enphase.jamacloud.com</code> (must be logged in)
+          </span>
+          <button class="btn btn-sm btn-secondary" onclick="copyImgScript(this)">Copy</button>
+        </div>
+        <textarea id="img-script-text" readonly class="log-pre"
+                  style="width:100%;height:200px;resize:vertical;cursor:text;white-space:pre"></textarea>
+        <div class="alert alert-info" style="margin-top:10px;font-size:.82rem;line-height:1.6">
+          <b>How to use:</b><br>
+          1. Open <code>enphase.jamacloud.com</code> in your browser while logged in<br>
+          2. Press <b>F12</b> &rarr; <b>Console</b> tab<br>
+          3. Paste the script and press <b>Enter</b><br>
+          4. The script fetches images from Jama (same-origin, your session) and uploads them here automatically<br>
+          5. Token expires in <b>30 minutes</b> &mdash; click Generate Script again if needed
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Schedule -->
   <div class="card">
     <div class="card-header">&#9200; Auto-Sync Schedule</div>
@@ -897,6 +943,7 @@ async function loadAdminPanel() {
   try {
     const d = await api('GET', '/admin/config');
     renderAdminProjects(d.projects);
+    updateImgPidDropdown(d.projects);
     setSelectedSched(d.schedule);
     document.getElementById('sched-time').value = d.schedule_time || '02:00';
     const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
@@ -1006,6 +1053,48 @@ function startSyncStream() {
 function clearLog() {
   document.getElementById('sync-log-pre').textContent = '';
   document.getElementById('sync-log-card').style.display = 'none';
+}
+
+// ── browser image sync ────────────────────────────────────────────────────
+function updateImgPidDropdown(projects) {
+  const sel = document.getElementById('img-pid');
+  const curr = sel.value;
+  sel.innerHTML = '<option value="">Select project...</option>' +
+    (projects||[]).filter(p=>p.synced).map(p =>
+      `<option value="${p.id}"${p.id==curr?' selected':''}>${p.name||'Project '+p.id} (ID: ${p.id})</option>`
+    ).join('');
+  if (!sel.querySelector('[selected]') && curr) sel.value = '';
+}
+async function genImgScript() {
+  const pid = document.getElementById('img-pid').value;
+  if (!pid) { showAlert('img-result','Select a project first','err'); return; }
+  try {
+    const r = await fetch(`/admin/image-sync/script?project_id=${pid}`);
+    if (!r.ok) {
+      const e = await r.json().catch(()=>({detail:r.statusText}));
+      throw new Error(e.detail || r.statusText);
+    }
+    const script = await r.text();
+    document.getElementById('img-script-text').value = script;
+    document.getElementById('img-script-area').style.display = 'block';
+    hideAlert('img-result');
+    document.getElementById('img-script-area').scrollIntoView({behavior:'smooth',block:'nearest'});
+  } catch(e) {
+    showAlert('img-result', e.message, 'err');
+    document.getElementById('img-script-area').style.display = 'none';
+  }
+}
+function copyImgScript(btn) {
+  const text = document.getElementById('img-script-text').value;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+  }).catch(() => {
+    document.getElementById('img-script-text').select();
+    document.execCommand('copy');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+  });
 }
 
 // ── schedule ──────────────────────────────────────────────────────────────
