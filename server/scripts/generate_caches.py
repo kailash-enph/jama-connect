@@ -2,8 +2,11 @@
 """Nightly cache generator for the Jama Connect LAN cache server.
 
 Connects to the Jama REST API, syncs all project data to SQLite databases,
-optionally fetches inline images using a JSESSIONID cookie, and compresses
-everything to .db.gz files served by nginx.
+embeds REST-accessible images via OAuth, and compresses everything to .db.gz
+files served by nginx.
+
+Browser-pasted inline images (not accessible via OAuth) are synced separately
+via the admin panel "Browser Image Sync" feature using a short-lived upload token.
 
 Usage:
     python generate_caches.py [--env .env] [--out ./data] [--projects 20570 20571]
@@ -16,7 +19,6 @@ Environment variables (from .env or shell):
     JAMA_URL            Jama instance URL
     JAMA_CLIENT_ID      OAuth2 client ID
     JAMA_CLIENT_SECRET  OAuth2 client secret
-    JAMA_SESSION_COOKIE JSESSIONID cookie (optional, for pasted images)
     JAMA_PROJECTS       Comma-separated project IDs (or "all")
     SERVE_DIR           Output directory (default: ./data)
 """
@@ -570,7 +572,7 @@ def _write_index_html(out_dir: Path) -> None:
     <div class="card-header">
       &#128444; Browser Image Sync
       <div class="hdr-actions">
-        <span style="font-size:.78rem;color:var(--green);font-weight:600">&#10003; No JSESSIONID stored server-side</span>
+        <span style="font-size:.78rem;color:var(--green);font-weight:600">&#10003; No credentials stored server-side</span>
       </div>
     </div>
     <div class="card-body">

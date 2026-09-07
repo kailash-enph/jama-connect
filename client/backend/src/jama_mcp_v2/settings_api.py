@@ -1,7 +1,7 @@
 """Settings API — /settings/* REST endpoints for configuration management.
 
-Provides credential management (OS keyring), session cookie handling,
-project selection, server control, and cache management.
+Provides credential management (OS keyring), project selection,
+server control, and cache management.
 """
 
 from __future__ import annotations

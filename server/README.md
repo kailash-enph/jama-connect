@@ -38,8 +38,7 @@ Register a nightly Task Scheduler job (Windows):
 
 ## Image Coverage
 
-Without `JAMA_SESSION_COOKIE`: ~40–70% of images (REST-uploaded files via OAuth)
-With fresh `JSESSIONID`: ~95–100% (includes browser-pasted inline images)
-
-The `JSESSIONID` expires in ~8 hours. Obtain it from browser F12 → Application →
-Cookies → enphase.jamacloud.com and paste into `.env` before running the generator.
+The nightly generator embeds all images accessible via the Jama OAuth REST API
+(~40–70% of total images). Browser-pasted inline images are synced separately
+via the admin panel **Browser Image Sync** tab, which uses a short-lived upload
+token — no credentials are stored server-side.

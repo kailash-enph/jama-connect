@@ -59,7 +59,7 @@ python -m jama_mcp_v2.server     # start REST + MCP server on port 8765
 | `api/deps.py` | FastAPI Depends() factories |
 | `api/db_mgmt.py` | `/api/db/*` — local DB management |
 | `api/cache_server_routes.py` | `/api/cache-server/*` — LAN server integration |
-| `settings_api.py` | `/settings/*` — credentials, session cookie |
+| `settings_api.py` | `/settings/*` — credentials, project selection, cache management |
 
 ### Key Architecture Rules
 - **`ProjectDb.bulk_write()`** — always use this context manager during full syncs. Defers all FTS index updates to a single rebuild at the end (~60× speedup).
@@ -189,4 +189,4 @@ uv run pytest tests/test_mcp_tools.py -v
 
 ### Fixture Notes
 - `mock_services` patches `jama_mcp_v2.services.services` (the `ServiceRegistry` singleton), **not** `jama_editor.editor_server` module globals (those were removed in the Phase 0 refactor).
-- `isolate_image_cache` (in `TestProxyImageEndpoint`) injects `tmp_path` as `image_cache_dir` to prevent stale-file pollution across tests.
+- `isolate_image_cache` (in `TestProxyImageEndpoint`) patches `jama_editor.editor_server._SVC_CACHE_DIR` to a fresh `tmp_path` per test, preventing stale-file pollution across tests.
