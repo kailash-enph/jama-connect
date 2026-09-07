@@ -510,6 +510,89 @@ def _store_images_in_db(project_id: int, images: list[dict]) -> int:
     return count
 
 
+def _count_images_in_gz(gz_path: Path) -> int:
+    """Return the row count of the images table inside a .db.gz file.
+
+    Decompresses to a temp file, queries SQLite, then removes the temp file.
+    Returns 0 if the file is absent, the table doesn't exist, or any error occurs.
+    """
+    if not gz_path.exists():
+        return 0
+    tmp = Path(tempfile.mktemp(suffix=".db"))
+    try:
+        with gzip.open(str(gz_path), "rb") as src, open(tmp, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        conn = sqlite3.connect(str(tmp))
+        try:
+            return conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _rebuild_index_json() -> None:
+    """Update index.json file-sizes + image counts from actual .db.gz files on disk.
+
+    Regenerates index.html afterwards.  Safe to call after browser image uploads —
+    reads only local files, makes no Jama API calls.
+    """
+    index_path = _DATA_DIR / "index.json"
+    if not index_path.exists():
+        logger.warning("_rebuild_index_json: index.json not found — skipping")
+        return
+    try:
+        idx = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error("_rebuild_index_json: failed to read index.json: %s", e)
+        return
+
+    for pid_str, p_data in idx.get("projects", {}).items():
+        variants: dict = p_data.setdefault("variants", {})
+
+        data_gz   = _DATA_DIR / "projects" / f"{pid_str}.db.gz"
+        images_gz = _DATA_DIR / "projects" / f"{pid_str}_images.db.gz"
+        with_gz   = _DATA_DIR / "projects" / f"{pid_str}_with_images.db.gz"
+
+        if data_gz.exists():
+            variants.setdefault("data_only", {})["file"] = f"projects/{pid_str}.db.gz"
+            variants["data_only"]["size_bytes"] = data_gz.stat().st_size
+
+        if images_gz.exists():
+            img_count = _count_images_in_gz(images_gz)
+            v = variants.setdefault("images", {})
+            v["file"]        = f"projects/{pid_str}_images.db.gz"
+            v["size_bytes"]  = images_gz.stat().st_size
+            v["image_count"] = img_count
+        else:
+            img_count = 0
+
+        if with_gz.exists():
+            v = variants.setdefault("with_images", {})
+            v["file"]        = f"projects/{pid_str}_with_images.db.gz"
+            v["size_bytes"]  = with_gz.stat().st_size
+            v["image_count"] = img_count   # same image set as images_gz
+
+    try:
+        index_path.write_text(json.dumps(idx, indent=2), encoding="utf-8")
+        logger.info("_rebuild_index_json: index.json updated")
+    except Exception as e:
+        logger.error("_rebuild_index_json: failed to write index.json: %s", e)
+        return
+
+    try:
+        sys.path.insert(0, str(_HERE / "scripts"))
+        from generate_caches import _write_index_html  # type: ignore[import]
+        _write_index_html(_DATA_DIR)
+        logger.info("_rebuild_index_json: index.html regenerated")
+    except Exception as e:
+        logger.warning("_rebuild_index_json: could not regenerate index.html: %s", e)
+
+
 def _make_upload_token() -> str:
     token = secrets.token_hex(20)
     _upload_tokens[token] = datetime.now(timezone.utc) + UPLOAD_TOKEN_TTL
@@ -983,6 +1066,11 @@ async def upload_browser_images(request: Request, token: str = ""):
         raise HTTPException(500, str(e), headers=_cors_headers())
 
     logger.info("Stored %d browser images for project %d", count, project_id)
+
+    # Rebuild index.json + index.html in the background so the dashboard
+    # reflects the new image counts without waiting for a full sync.
+    threading.Thread(target=_rebuild_index_json, daemon=True).start()
+
     return JSONResponse(
         {
             "ok": True,
@@ -991,6 +1079,21 @@ async def upload_browser_images(request: Request, token: str = ""):
         },
         headers=_cors_headers(),
     )
+
+
+@app.post("/admin/rebuild-index")
+def rebuild_index(_: None = Depends(_require_auth)):
+    """Rebuild index.json + index.html from current .db.gz file stats.
+
+    Updates image counts and file sizes without a full Jama sync.
+    Useful after browser image uploads to refresh the public dashboard.
+    """
+    try:
+        _rebuild_index_json()
+        return {"ok": True, "message": "index.json + index.html rebuilt"}
+    except Exception as e:
+        logger.error("rebuild_index failed: %s", e, exc_info=True)
+        raise HTTPException(500, str(e))
 
 
 # ── static file serving ───────────────────────────────────────────────────────

@@ -751,6 +751,9 @@ def _write_index_html(out_dir: Path) -> None:
       &#128444; Browser Image Sync
       <div class="hdr-actions">
         <span style="font-size:.78rem;color:var(--green);font-weight:600">&#10003; No credentials stored server-side</span>
+        <button class="btn btn-sm btn-secondary" onclick="rebuildDashboard(this)" title="Refresh image counts + regenerate dashboard after a browser sync">
+          &#128260; Rebuild Dashboard
+        </button>
       </div>
     </div>
     <div class="card-body">
@@ -1156,6 +1159,23 @@ function startSyncStream() {
 function clearLog() {
   document.getElementById('sync-log-pre').textContent = '';
   document.getElementById('sync-log-card').style.display = 'none';
+}
+
+// ── rebuild dashboard ────────────────────────────────────────────────────
+async function rebuildDashboard(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Rebuilding…';
+  try {
+    const d = await api('POST', '/admin/rebuild-index');
+    btn.textContent = '✓ Done';
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 2500);
+    // Reload the public stats table so the new image counts appear immediately
+    await loadStats();
+  } catch(e) {
+    btn.textContent = '✗ Failed';
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 3000);
+    showAlert('img-result', 'Rebuild failed: ' + (e.message || e), 'err');
+  }
 }
 
 // ── browser image sync ────────────────────────────────────────────────────
