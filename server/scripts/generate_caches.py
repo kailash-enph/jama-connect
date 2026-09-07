@@ -68,58 +68,86 @@ def load_env(env_path: str) -> None:
     logger.info("Loaded env from %s", env_path)
 
 
-def _merge_browser_images(project_id: int, db_path: Path, out_dir: Path) -> int:
-    """Merge browser-uploaded images from the persistent sidecar into db_path.
+_IMAGES_DDL = """
+    CREATE TABLE IF NOT EXISTS images (
+        attachment_id INTEGER PRIMARY KEY,
+        file_name     TEXT    NOT NULL DEFAULT '',
+        mime_type     TEXT    NOT NULL DEFAULT 'image/png',
+        data          BLOB    NOT NULL,
+        size_bytes    INTEGER NOT NULL DEFAULT 0,
+        cached_at     REAL    NOT NULL DEFAULT 0
+    )
+"""
+_IMAGES_UPSERT = """
+    INSERT INTO images(attachment_id,file_name,mime_type,data,size_bytes,cached_at)
+    VALUES(?,?,?,?,?,?)
+    ON CONFLICT(attachment_id) DO UPDATE SET
+        mime_type=excluded.mime_type, data=excluded.data,
+        size_bytes=excluded.size_bytes, cached_at=excluded.cached_at
+"""
 
-    The sidecar ({out_dir}/projects/{project_id}_browser_images.db) is written
-    by cache_server.py every time a browser image sync upload succeeds.  It
-    survives nightly regeneration because this script never writes to it.
 
-    Returns the number of images merged (0 if no sidecar exists).
-    """
-    sidecar = out_dir / "projects" / f"{project_id}_browser_images.db"
-    if not sidecar.exists():
-        return 0
-
-    src_conn = sqlite3.connect(str(sidecar))
-    dst_conn = sqlite3.connect(str(db_path))
+def _upsert_images(src: Path, dst: Path) -> int:
+    """Upsert all rows from src.images into dst.images.  Returns row count."""
+    src_conn = sqlite3.connect(str(src))
+    dst_conn = sqlite3.connect(str(dst))
     count = 0
     try:
-        # Ensure images table exists in the destination (it should, from schema DDL)
-        dst_conn.execute("""
-            CREATE TABLE IF NOT EXISTS images (
-                attachment_id INTEGER PRIMARY KEY,
-                file_name     TEXT    NOT NULL DEFAULT '',
-                mime_type     TEXT    NOT NULL DEFAULT 'image/png',
-                data          BLOB    NOT NULL,
-                size_bytes    INTEGER NOT NULL DEFAULT 0,
-                cached_at     REAL    NOT NULL DEFAULT 0
-            )
-        """)
+        dst_conn.execute(_IMAGES_DDL)
         try:
             rows = src_conn.execute(
                 "SELECT attachment_id, file_name, mime_type, data, size_bytes, cached_at FROM images"
             ).fetchall()
         except sqlite3.OperationalError:
-            return 0  # sidecar has no images table yet
-
+            return 0  # src has no images table
         for row in rows:
-            dst_conn.execute(
-                """INSERT INTO images(attachment_id,file_name,mime_type,data,size_bytes,cached_at)
-                   VALUES(?,?,?,?,?,?)
-                   ON CONFLICT(attachment_id) DO UPDATE SET
-                     mime_type=excluded.mime_type, data=excluded.data,
-                     size_bytes=excluded.size_bytes, cached_at=excluded.cached_at""",
-                row,
-            )
+            dst_conn.execute(_IMAGES_UPSERT, row)
             count += 1
         dst_conn.commit()
     finally:
         src_conn.close()
         dst_conn.close()
+    return count
 
+
+def _count_images(db_path: Path) -> int:
+    """Return the number of rows in the images table (0 if table absent)."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        try:
+            return conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
+    finally:
+        conn.close()
+
+
+def _load_images_db(images_gz: Path, tmp_path: Path) -> None:
+    """Decompress existing images-only DB into tmp_path, or create a fresh one."""
+    if images_gz.exists():
+        with gzip.open(images_gz, "rb") as gz_in, open(tmp_path, "wb") as f_out:
+            shutil.copyfileobj(gz_in, f_out)
+    else:
+        conn = sqlite3.connect(str(tmp_path))
+        conn.execute(_IMAGES_DDL)
+        conn.commit()
+        conn.close()
+
+
+def _migrate_sidecar(project_id: int, images_tmp: Path, out_dir: Path) -> int:
+    """One-time migration: copy old browser_images.db sidecar into images_tmp.
+
+    The sidecar ({out_dir}/projects/{id}_browser_images.db) was written by
+    the previous sidecar-based approach in cache_server.py.  This function
+    merges it into the new cumulative images DB every run (idempotent upsert).
+    Returns number of rows migrated.
+    """
+    sidecar = out_dir / "projects" / f"{project_id}_browser_images.db"
+    if not sidecar.exists():
+        return 0
+    count = _upsert_images(src=sidecar, dst=images_tmp)
     if count:
-        logger.info("  Merged %d browser-uploaded image(s) from sidecar", count)
+        logger.info("  Migrated %d image(s) from legacy browser sidecar", count)
     return count
 
 
@@ -172,39 +200,65 @@ async def generate_project(
     data_only_size = data_only_path.stat().st_size
     logger.info("  data_only: %s (%.1f MB)", data_only_path.name, data_only_size / 1024 / 1024)
 
-    # --- Pass 2: fetch images and embed in with_images variant ---
-    img_db_path = tmp_dir / f"{project_id}_with_images.db"
-    shutil.copy2(db_path, img_db_path)
+    # --- Pass 2a: fetch fresh REST images into a temp full DB ---
+    with_tmp = tmp_dir / f"{project_id}_with_images.db"
+    shutil.copy2(db_path, with_tmp)
 
-    proj_db2 = ProjectDb(img_db_path, project_id)
+    proj_db2 = ProjectDb(with_tmp, project_id)
     await proj_db2.open()
     try:
-        # Get all items for image URL scanning
         all_items = await proj_db2.get_all_items()
-
-        # Fetch REST-API images via OAuth Bearer token
         rest_count = await _fetch_rest_images(proj_db2, all_items, jama_url, client_id, client_secret)
-        logger.info("  Images: %d REST-API images embedded", rest_count)
+        logger.info("  REST images fetched: %d", rest_count)
     finally:
         await proj_db2.close()
 
-    # Merge browser-uploaded images from persistent sidecar (survives nightly runs)
-    browser_count = _merge_browser_images(project_id, img_db_path, out_dir)
+    # --- Pass 2b: update the cumulative {id}_images.db.gz (images-only, persistent) ---
+    #
+    # This file accumulates images across nightly runs:
+    #   - REST images: upserted fresh from Jama API each run
+    #   - Browser images: written by cache_server.py on each browser sync — never lost
+    #
+    images_gz = projects_dir / f"{project_id}_images.db.gz"
+    images_tmp = tmp_dir / f"{project_id}_images.db"
 
-    # Export with_images variant
-    with_images_path = projects_dir / f"{project_id}_with_images.db.gz"
-    _compress_db(img_db_path, with_images_path)
-    with_images_size = with_images_path.stat().st_size
-    total_images = rest_count + browser_count
+    # Load existing images DB (preserves browser images) or start fresh
+    _load_images_db(images_gz, images_tmp)
+
+    # Upsert fresh REST images into the cumulative images DB
+    _upsert_images(src=with_tmp, dst=images_tmp)
+
+    # Migrate legacy browser sidecar if present (idempotent, backward compat)
+    _migrate_sidecar(project_id, images_tmp, out_dir)
+
+    # Compress → {id}_images.db.gz  (the single source of truth for all images)
+    _compress_db(images_tmp, images_gz)
+    images_gz_size = images_gz.stat().st_size
+    total_images = _count_images(images_tmp)
+    browser_count = max(0, total_images - rest_count)
+
     logger.info(
-        "  with_images: %s (%.1f MB) — %d REST + %d browser = %d total images",
-        with_images_path.name, with_images_size / 1024 / 1024,
-        rest_count, browser_count, total_images,
+        "  images.db.gz: %.1f MB — %d REST + %d browser = %d total",
+        images_gz_size / 1024 / 1024, rest_count, browser_count, total_images,
     )
 
-    # Cleanup temp files (rename-to-trash if Windows locks prevent deletion)
+    # --- Pass 2c: generate {id}_with_images.db.gz = data + ALL images ---
+    #
+    # with_tmp currently has data + REST images.
+    # Upsert browser images from images_tmp so the merged DB has everything.
+    _upsert_images(src=images_tmp, dst=with_tmp)
+
+    with_images_path = projects_dir / f"{project_id}_with_images.db.gz"
+    _compress_db(with_tmp, with_images_path)
+    with_images_size = with_images_path.stat().st_size
+    logger.info(
+        "  with_images.db.gz: %.1f MB (%d total images)", with_images_size / 1024 / 1024, total_images
+    )
+
+    # Cleanup temp files
     _remove_db(db_path)
-    _remove_db(img_db_path)
+    _remove_db(images_tmp)
+    _remove_db(with_tmp)
 
     return {
         "id": project_id,
@@ -216,12 +270,17 @@ async def generate_project(
                 "file": f"projects/{project_id}.db.gz",
                 "size_bytes": data_only_size,
             },
+            "images": {
+                "file": f"projects/{project_id}_images.db.gz",
+                "size_bytes": images_gz_size,
+                "image_count": total_images,
+                "rest_image_count": rest_count,
+                "browser_image_count": browser_count,
+            },
             "with_images": {
                 "file": f"projects/{project_id}_with_images.db.gz",
                 "size_bytes": with_images_size,
                 "image_count": total_images,
-                "rest_image_count": rest_count,
-                "browser_image_count": browser_count,
             },
         },
     }

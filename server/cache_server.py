@@ -444,28 +444,19 @@ def _scan_project_for_images(project_id: int) -> list[dict]:
         tmp.unlink(missing_ok=True)
 
 
-def _store_images_in_db(project_id: int, images: list[dict]) -> int:
-    """Insert browser-fetched image blobs into the persistent sidecar and
-    the live _with_images.db.gz file.
+def _upsert_images_into_gz(gz_path: Path, images: list[dict], fallback_gz: Path | None = None) -> int:
+    """Decompress gz_path (or fallback_gz), upsert images, recompress to gz_path.
 
-    The sidecar (_browser_images.db) is written first so images are never
-    lost even if the gz rewrite fails.  Falls back to data_only DB if
-    _with_images.db.gz does not exist yet.  Returns the number of images stored.
+    Creates gz_path from scratch (images-only schema) if neither file exists.
+    Returns the number of images upserted.
     """
-    # 1. Persist durably — survives nightly generate_caches.py runs
-    _save_to_sidecar(project_id, images)
-
-    # 2. Also update the live .db.gz so clients see changes immediately
-    with_gz = _DATA_DIR / "projects" / f"{project_id}_with_images.db.gz"
-    data_gz = _DATA_DIR / "projects" / f"{project_id}.db.gz"
-    src_gz = with_gz if with_gz.exists() else data_gz
-    if not src_gz.exists():
-        raise FileNotFoundError(f"No DB found for project {project_id} — run a sync first")
+    src_gz = gz_path if gz_path.exists() else (fallback_gz if fallback_gz and fallback_gz.exists() else None)
 
     tmp = Path(tempfile.mktemp(suffix=".db"))
     try:
-        with gzip.open(src_gz, "rb") as gz_in, open(tmp, "wb") as f_out:
-            shutil.copyfileobj(gz_in, f_out)
+        if src_gz:
+            with gzip.open(src_gz, "rb") as gz_in, open(tmp, "wb") as f_out:
+                shutil.copyfileobj(gz_in, f_out)
 
         conn = sqlite3.connect(str(tmp))
         count = 0
@@ -483,12 +474,40 @@ def _store_images_in_db(project_id: int, images: list[dict]) -> int:
         finally:
             conn.close()
 
-        # Recompress as _with_images.db.gz
-        with open(tmp, "rb") as f_in, gzip.open(with_gz, "wb", compresslevel=6) as f_out:
+        with open(tmp, "rb") as f_in, gzip.open(gz_path, "wb", compresslevel=6) as f_out:
             shutil.copyfileobj(f_in, f_out)
         return count
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _store_images_in_db(project_id: int, images: list[dict]) -> int:
+    """Persist browser-uploaded images and refresh both live .db.gz files.
+
+    Write order (most durable first):
+      1. Sidecar plain sqlite  — written first; zero-risk; survives any gz failure
+      2. {id}_images.db.gz     — cumulative images-only DB; survives nightly regeneration
+      3. {id}_with_images.db.gz — merged DB; updated so clients see changes immediately
+
+    Returns the number of images stored.
+    """
+    data_gz    = _DATA_DIR / "projects" / f"{project_id}.db.gz"
+    images_gz  = _DATA_DIR / "projects" / f"{project_id}_images.db.gz"
+    with_gz    = _DATA_DIR / "projects" / f"{project_id}_with_images.db.gz"
+
+    if not data_gz.exists() and not images_gz.exists() and not with_gz.exists():
+        raise FileNotFoundError(f"No DB found for project {project_id} — run a sync first")
+
+    # 1. Sidecar (backward compat + zero-risk durable write)
+    _save_to_sidecar(project_id, images)
+
+    # 2. Update cumulative images-only DB ({id}_images.db.gz)
+    count = _upsert_images_into_gz(images_gz, images)
+
+    # 3. Update live merged DB ({id}_with_images.db.gz) for immediate client visibility
+    _upsert_images_into_gz(with_gz, images, fallback_gz=data_gz)
+
+    return count
 
 
 def _make_upload_token() -> str:
