@@ -349,9 +349,10 @@ async def generate_master_db(project_metas: list[dict], out_dir: Path) -> int:
 def _write_index_html(out_dir: Path) -> None:
     """Write a self-contained HTML dashboard to out_dir/index.html.
 
-    The page fetches index.json at load time (and every 60 s) so it always
-    shows current data without needing to regenerate the HTML file itself.
-    Works with both ``python -m http.server`` and nginx.
+    Public view: live stats, projects table, master DB info (fetches index.json).
+    Admin panel (requires cache_server.py): project CRUD, schedule management,
+    live sync log via SSE, password change.  Falls back gracefully when served
+    by a plain static server (admin button is hidden on 404).
     """
     html = r"""<!DOCTYPE html>
 <html lang="en">
@@ -361,75 +362,154 @@ def _write_index_html(out_dir: Path) -> None:
 <title>Jama Connect Cache Server</title>
 <style>
   :root {
-    --blue: #0066cc; --blue-light: #e8f0fb; --green: #1a7f37;
-    --amber: #b45309; --red: #cf222e; --gray: #57606a;
-    --border: #d0d7de; --bg: #f6f8fa; --card: #ffffff;
-    --radius: 8px; --shadow: 0 1px 4px rgba(0,0,0,.1);
+    --blue:#0066cc; --blue-light:#e8f0fb; --blue-dark:#0052a3;
+    --green:#1a7f37; --amber:#b45309; --red:#cf222e; --gray:#57606a;
+    --border:#d0d7de; --bg:#f6f8fa; --card:#ffffff;
+    --radius:8px; --shadow:0 1px 4px rgba(0,0,0,.1);
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: var(--bg); color: #24292f; line-height: 1.5; padding: 24px; }
-  header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
-  header h1 { font-size: 1.4rem; font-weight: 600; }
-  header .badge { background: var(--blue); color: #fff; font-size: .75rem;
-                  padding: 2px 8px; border-radius: 12px; font-weight: 600; }
-  .meta { color: var(--gray); font-size: .85rem; margin-bottom: 20px; }
-  .meta span { margin-right: 20px; }
-  .card { background: var(--card); border: 1px solid var(--border);
-           border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 20px; }
-  .card-header { padding: 14px 20px; border-bottom: 1px solid var(--border);
-                  font-weight: 600; font-size: .95rem; display: flex;
-                  align-items: center; gap: 8px; }
-  .card-body { padding: 20px; }
-  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-  th { background: var(--bg); text-align: left; padding: 8px 12px;
-       border-bottom: 2px solid var(--border); color: var(--gray);
-       font-weight: 600; font-size: .8rem; text-transform: uppercase;
-       letter-spacing: .05em; }
-  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: var(--blue-light); }
-  .project-name { font-weight: 600; }
-  .project-id { color: var(--gray); font-size: .8rem; }
-  .pill { display: inline-block; border-radius: 12px; font-size: .75rem;
-           padding: 2px 8px; font-weight: 600; }
-  .pill-green { background: #dafbe1; color: var(--green); }
-  .pill-amber { background: #fff8c5; color: var(--amber); }
-  .pill-red   { background: #ffebe9; color: var(--red); }
-  .dl-link { display: inline-flex; align-items: center; gap: 4px;
-              color: var(--blue); text-decoration: none; font-size: .82rem;
-              border: 1px solid var(--blue); border-radius: 4px;
-              padding: 2px 8px; margin-right: 6px; white-space: nowrap; }
-  .dl-link:hover { background: var(--blue-light); }
-  .size-note { color: var(--gray); font-size: .78rem; display: block; margin-top: 2px; }
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-               gap: 16px; }
-  .stat-box { background: var(--bg); border: 1px solid var(--border);
-              border-radius: var(--radius); padding: 14px 16px; }
-  .stat-box .val { font-size: 1.4rem; font-weight: 700; color: var(--blue); }
-  .stat-box .lbl { font-size: .8rem; color: var(--gray); margin-top: 2px; }
-  #refresh-ts { float: right; font-size: .78rem; color: var(--gray); }
-  .spinner { display: inline-block; width: 14px; height: 14px;
-             border: 2px solid var(--border); border-top-color: var(--blue);
-             border-radius: 50%; animation: spin .6s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  #err { display: none; background: #ffebe9; border: 1px solid #ff8182;
-         color: var(--red); border-radius: var(--radius); padding: 12px 16px; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       background:var(--bg);color:#24292f;line-height:1.5;padding:24px}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:24px}
+  header h1{font-size:1.4rem;font-weight:600;flex:1}
+  .badge{background:var(--blue);color:#fff;font-size:.75rem;
+         padding:2px 8px;border-radius:12px;font-weight:600}
+  .meta{color:var(--gray);font-size:.85rem;margin-bottom:20px;display:flex;justify-content:space-between}
+  /* cards */
+  .card{background:var(--card);border:1px solid var(--border);
+        border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:20px}
+  .card-header{padding:14px 20px;border-bottom:1px solid var(--border);
+               font-weight:600;font-size:.95rem;display:flex;align-items:center;gap:8px}
+  .card-header .hdr-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+  .card-body{padding:20px}
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:.9rem}
+  th{background:var(--bg);text-align:left;padding:8px 12px;
+     border-bottom:2px solid var(--border);color:var(--gray);
+     font-weight:600;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em}
+  td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:var(--blue-light)}
+  .proj-name{font-weight:600}
+  .proj-id{color:var(--gray);font-size:.8rem}
+  /* pills */
+  .pill{display:inline-block;border-radius:12px;font-size:.75rem;padding:2px 8px;font-weight:600}
+  .pill-green{background:#dafbe1;color:var(--green)}
+  .pill-amber{background:#fff8c5;color:var(--amber)}
+  .pill-red{background:#ffebe9;color:var(--red)}
+  .pill-blue{background:var(--blue-light);color:var(--blue)}
+  /* download links */
+  .dl-link{display:inline-flex;align-items:center;gap:4px;color:var(--blue);
+           text-decoration:none;font-size:.82rem;border:1px solid var(--blue);
+           border-radius:4px;padding:2px 8px;margin-right:6px;white-space:nowrap}
+  .dl-link:hover{background:var(--blue-light)}
+  .sz{color:var(--gray);font-size:.78rem;display:block;margin-top:1px}
+  /* stat grid */
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px}
+  .stat-box{background:var(--bg);border:1px solid var(--border);
+            border-radius:var(--radius);padding:14px 16px}
+  .stat-box .val{font-size:1.4rem;font-weight:700;color:var(--blue)}
+  .stat-box .lbl{font-size:.8rem;color:var(--gray);margin-top:2px}
+  /* spinner */
+  .spinner{display:inline-block;width:14px;height:14px;
+           border:2px solid var(--border);border-top-color:var(--blue);
+           border-radius:50%;animation:spin .6s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* buttons */
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;
+       border-radius:6px;font-size:.85rem;font-weight:500;cursor:pointer;
+       border:1px solid transparent;transition:all .15s}
+  .btn:disabled{opacity:.5;cursor:default}
+  .btn-primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+  .btn-primary:hover:not(:disabled){background:var(--blue-dark)}
+  .btn-secondary{background:transparent;color:var(--blue);border-color:var(--blue)}
+  .btn-secondary:hover:not(:disabled){background:var(--blue-light)}
+  .btn-danger{background:transparent;color:var(--red);border-color:var(--red)}
+  .btn-danger:hover:not(:disabled){background:#ffebe9}
+  .btn-ghost{background:transparent;color:var(--gray);border-color:transparent}
+  .btn-ghost:hover{background:var(--bg)}
+  .btn-sm{padding:3px 10px;font-size:.8rem}
+  /* inputs */
+  input[type=text],input[type=number],input[type=password],input[type=time]{
+    padding:6px 10px;border:1px solid var(--border);border-radius:6px;
+    font-size:.88rem;width:100%;outline:none}
+  input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(0,102,204,.15)}
+  /* error/info bars */
+  .alert{border-radius:var(--radius);padding:10px 14px;font-size:.88rem;margin-bottom:12px}
+  .alert-err{background:#ffebe9;border:1px solid #ff8182;color:var(--red)}
+  .alert-ok{background:#dafbe1;border:1px solid #4ac26b;color:var(--green)}
+  .alert-info{background:var(--blue-light);border:1px solid #84b6f4;color:#0550ae}
+  /* modals */
+  .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);
+            display:flex;align-items:center;justify-content:center;z-index:100}
+  .modal{background:var(--card);border-radius:var(--radius);padding:28px;
+         width:100%;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,.22)}
+  .modal h3{font-size:1.1rem;font-weight:700;margin-bottom:8px}
+  .modal p{color:var(--gray);font-size:.88rem;margin-bottom:16px}
+  .modal .field{margin-bottom:12px}
+  .modal .field label{display:block;font-size:.82rem;font-weight:600;
+                      color:var(--gray);margin-bottom:4px}
+  .modal-actions{display:flex;gap:8px;margin-top:16px}
+  /* section divider */
+  .section-div{display:flex;align-items:center;gap:12px;margin:28px 0 20px}
+  .section-div span{font-weight:700;font-size:1rem;white-space:nowrap;color:#24292f}
+  .section-div::before,.section-div::after{content:'';flex:1;height:2px;
+    background:linear-gradient(to right,var(--blue),var(--border))}
+  .section-div::after{background:linear-gradient(to left,var(--blue),var(--border))}
+  /* schedule cards */
+  .sched-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px}
+  .sched-card{border:2px solid var(--border);border-radius:var(--radius);
+              padding:12px;cursor:pointer;text-align:center;transition:all .15s;user-select:none}
+  .sched-card:hover{border-color:var(--blue);background:var(--blue-light)}
+  .sched-card.active{border-color:var(--blue);background:var(--blue-light)}
+  .sched-card .sc-name{font-weight:700;font-size:.9rem;margin-bottom:2px}
+  .sched-card .sc-desc{font-size:.75rem;color:var(--gray)}
+  /* sync log */
+  .log-pre{font-family:"Cascadia Code","Consolas","Courier New",monospace;
+           font-size:.78rem;line-height:1.5;background:#0d1117;color:#e6edf3;
+           padding:14px;border-radius:6px;max-height:320px;overflow-y:auto;
+           white-space:pre-wrap;word-break:break-all}
+  /* add-form inline */
+  .add-form{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;
+            padding:14px;background:var(--bg);border-radius:var(--radius);
+            border:1px solid var(--border);margin-bottom:12px}
+  .add-form .af-field{flex:0 0 180px}
+  .add-form .af-field label{display:block;font-size:.8rem;font-weight:600;
+                             color:var(--gray);margin-bottom:4px}
+  /* action row in table */
+  .act{display:flex;gap:6px;flex-wrap:wrap}
+  /* pw form */
+  .pw-form{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+           padding:16px;margin-bottom:12px}
+  .pw-form .field{margin-bottom:10px}
+  .pw-form .field label{display:block;font-size:.8rem;font-weight:600;
+                         color:var(--gray);margin-bottom:4px}
+  /* pub error */
+  #pub-err{display:none;margin-bottom:16px}
 </style>
 </head>
 <body>
+
+<!-- ═══ HEADER ═══════════════════════════════════════════════════════════ -->
 <header>
   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0066cc" stroke-width="2">
-    <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v5c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/>
+    <ellipse cx="12" cy="5" rx="9" ry="3"/>
+    <path d="M3 5v5c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/>
     <path d="M3 10v5c0 1.66 4.03 3 9 3s9-1.34 9-3v-5"/>
     <path d="M3 15v4c0 1.66 4.03 3 9 3s9-1.34 9-3v-4"/>
   </svg>
   <h1>Jama Connect Cache Server</h1>
   <span class="badge">LAN</span>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+    <span id="admin-user" style="display:none;font-size:.82rem;color:var(--gray)">Admin</span>
+    <button id="admin-btn" class="btn btn-secondary btn-sm" onclick="showLogin()" style="display:none">
+      &#128274; Admin
+    </button>
+  </div>
 </header>
 
-<div id="err">Failed to load index.json — is the server running?</div>
-
+<!-- ═══ PUBLIC SECTION ══════════════════════════════════════════════════ -->
+<div id="pub-err" class="alert alert-err"></div>
 <div class="meta">
   <span id="gen-at">Loading...</span>
   <span id="refresh-ts"></span>
@@ -437,13 +517,13 @@ def _write_index_html(out_dir: Path) -> None:
 
 <div class="card">
   <div class="card-header">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
       <path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h11A1.5 1.5 0 0 1 15 3.5v2A1.5 1.5 0 0 1 13.5 7h-11A1.5 1.5 0 0 1 1 5.5v-2Zm0 6A1.5 1.5 0 0 1 2.5 8h11A1.5 1.5 0 0 1 15 9.5v2A1.5 1.5 0 0 1 13.5 13h-11A1.5 1.5 0 0 1 1 11.5v-2Z"/>
     </svg>
     Summary
   </div>
   <div class="card-body">
-    <div class="stat-grid" id="stat-grid">
+    <div class="stat-grid">
       <div class="stat-box"><div class="val spinner" id="s-projects"></div><div class="lbl">Projects cached</div></div>
       <div class="stat-box"><div class="val" id="s-items">—</div><div class="lbl">Total items</div></div>
       <div class="stat-box"><div class="val" id="s-size">—</div><div class="lbl">Total data size</div></div>
@@ -453,26 +533,15 @@ def _write_index_html(out_dir: Path) -> None:
 </div>
 
 <div class="card">
-  <div class="card-header">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v12.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25V1.75Z"/>
-    </svg>
-    Projects
-  </div>
+  <div class="card-header">Projects (read-only view)</div>
   <div style="overflow-x:auto">
     <table>
-      <thead>
-        <tr>
-          <th>Project</th>
-          <th>Items</th>
-          <th>Last Sync</th>
-          <th>Status</th>
-          <th>Downloads</th>
-        </tr>
-      </thead>
-      <tbody id="proj-tbody">
+      <thead><tr>
+        <th>Project</th><th>Items</th><th>Last Sync</th><th>Status</th><th>Downloads</th>
+      </tr></thead>
+      <tbody id="pub-proj-tbody">
         <tr><td colspan="5" style="text-align:center;color:var(--gray);padding:24px">
-          <span class="spinner"></span> Loading projects...
+          <span class="spinner"></span> Loading...
         </td></tr>
       </tbody>
     </table>
@@ -484,94 +553,478 @@ def _write_index_html(out_dir: Path) -> None:
   <div class="card-body" id="master-info" style="color:var(--gray);font-size:.88rem">Loading...</div>
 </div>
 
+<!-- ═══ MODALS ═══════════════════════════════════════════════════════════ -->
+<!-- Login modal -->
+<div id="login-backdrop" class="backdrop" style="display:none" onclick="closeLogin()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h3>&#128274; Admin Login</h3>
+    <p>Enter the admin password to manage projects and sync settings.</p>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="login-pw" placeholder="Admin password"
+             onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <div id="login-err" class="alert alert-err" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" onclick="doLogin()">Login</button>
+      <button class="btn btn-ghost" onclick="closeLogin()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- First-run setup modal -->
+<div id="setup-backdrop" class="backdrop" style="display:none">
+  <div class="modal">
+    <h3>&#9989; First-Time Setup</h3>
+    <p>Welcome! Set an admin password to manage projects and sync settings.</p>
+    <div class="field">
+      <label>Choose a password (min 6 characters)</label>
+      <input type="password" id="setup-pw" placeholder="New password">
+    </div>
+    <div class="field">
+      <label>Confirm password</label>
+      <input type="password" id="setup-pw2" placeholder="Repeat password"
+             onkeydown="if(event.key==='Enter')doSetup()">
+    </div>
+    <div id="setup-err" class="alert alert-err" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" onclick="doSetup()">Set Password &amp; Continue</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ADMIN PANEL ═══════════════════════════════════════════════════════ -->
+<div id="admin-panel" style="display:none">
+  <div class="section-div"><span>&#128272; Admin Panel</span></div>
+
+  <!-- Project Management -->
+  <div class="card">
+    <div class="card-header">
+      &#128193; Project Management
+      <div class="hdr-actions">
+        <button class="btn btn-sm btn-secondary" onclick="doSyncAll()">&#8635; Sync All</button>
+        <button class="btn btn-sm btn-primary" onclick="showAddForm()">&#43; Add Project</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <!-- Add-project inline form (hidden by default) -->
+      <div id="add-form" class="add-form" style="display:none">
+        <div class="af-field">
+          <label>Jama Project ID</label>
+          <input type="number" id="add-pid" placeholder="e.g. 20571"
+                 onkeydown="if(event.key==='Enter')doAddProject()">
+        </div>
+        <button class="btn btn-primary" onclick="doAddProject()">Add &amp; Sync</button>
+        <button class="btn btn-ghost" onclick="hideAddForm()">Cancel</button>
+      </div>
+      <div id="add-result" style="display:none;margin-bottom:10px"></div>
+      <div style="overflow-x:auto">
+        <table id="admin-proj-table">
+          <thead><tr>
+            <th>Project</th><th>Items</th><th>Last Sync</th><th>Status</th><th>Actions</th>
+          </tr></thead>
+          <tbody id="admin-proj-tbody">
+            <tr><td colspan="5" style="text-align:center;color:var(--gray);padding:16px">
+              <span class="spinner"></span> Loading...
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sync Log -->
+  <div class="card" id="sync-log-card" style="display:none">
+    <div class="card-header">
+      &#128221; Sync Log
+      <div class="hdr-actions">
+        <span id="sync-badge"></span>
+        <button class="btn btn-sm btn-ghost" onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="card-body" style="padding:12px">
+      <pre id="sync-log-pre" class="log-pre"></pre>
+    </div>
+  </div>
+
+  <!-- Schedule -->
+  <div class="card">
+    <div class="card-header">&#9200; Auto-Sync Schedule</div>
+    <div class="card-body">
+      <div class="sched-grid" id="sched-grid">
+        <div class="sched-card" data-val="daily" onclick="selectSched('daily')">
+          <div class="sc-name">Daily</div>
+          <div class="sc-desc">Every 24 h</div>
+        </div>
+        <div class="sched-card" data-val="biweekly" onclick="selectSched('biweekly')">
+          <div class="sc-name">Biweekly</div>
+          <div class="sc-desc">Every 3 days</div>
+        </div>
+        <div class="sched-card" data-val="weekly" onclick="selectSched('weekly')">
+          <div class="sc-name">Weekly</div>
+          <div class="sc-desc">Every 7 days</div>
+        </div>
+        <div class="sched-card" data-val="monthly" onclick="selectSched('monthly')">
+          <div class="sc-name">Monthly</div>
+          <div class="sc-desc">Every 30 days</div>
+        </div>
+        <div class="sched-card" data-val="never" onclick="selectSched('never')">
+          <div class="sc-name">Manual</div>
+          <div class="sc-desc">No auto sync</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+        <label style="font-size:.88rem;color:var(--gray);font-weight:600">
+          Sync time (UTC):
+          <input type="time" id="sched-time" value="02:00"
+                 style="width:auto;margin-left:6px;display:inline-block">
+        </label>
+        <span id="next-sync-label" style="font-size:.85rem;color:var(--gray)"></span>
+      </div>
+      <div id="sched-result" style="display:none;margin-bottom:10px"></div>
+      <button class="btn btn-primary" onclick="saveSchedule()">Save Schedule</button>
+    </div>
+  </div>
+
+  <!-- Security -->
+  <div class="card">
+    <div class="card-header">&#128274; Security</div>
+    <div class="card-body">
+      <div id="pw-form" class="pw-form" style="display:none">
+        <div class="field">
+          <label>Current password</label>
+          <input type="password" id="curr-pw" placeholder="Current password">
+        </div>
+        <div class="field">
+          <label>New password (min 6 characters)</label>
+          <input type="password" id="new-pw" placeholder="New password"
+                 onkeydown="if(event.key==='Enter')doChangePw()">
+        </div>
+        <div id="pw-result" style="display:none;margin-bottom:10px"></div>
+        <div class="act">
+          <button class="btn btn-primary" onclick="doChangePw()">Update Password</button>
+          <button class="btn btn-ghost" onclick="hidePwForm()">Cancel</button>
+        </div>
+      </div>
+      <div class="act">
+        <button class="btn btn-secondary" onclick="showPwForm()">Change Password</button>
+        <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /admin-panel -->
+
 <script>
-function fmt_size(bytes) {
-  if (!bytes) return '—';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
-  return (bytes/1024/1024).toFixed(1) + ' MB';
+// ── utilities ─────────────────────────────────────────────────────────────
+function fmtSize(b) {
+  if (!b) return '—';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
 }
-function fmt_date(iso) {
+function fmtDate(iso) {
   if (!iso) return '—';
   try {
-    const d = new Date(iso);
-    const pad = n => String(n).padStart(2,'0');
-    return d.toLocaleDateString() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  } catch(e) { return iso; }
+    const d = new Date(iso), p = n => String(n).padStart(2,'0');
+    return d.toLocaleDateString() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  } catch(_) { return iso; }
 }
-function age_pill(iso) {
+function agePill(iso) {
   if (!iso) return '<span class="pill pill-amber">Unknown</span>';
-  const age_h = (Date.now() - new Date(iso)) / 3600000;
-  if (age_h < 25)  return '<span class="pill pill-green">Fresh</span>';
-  if (age_h < 73)  return '<span class="pill pill-amber">Aging (' + Math.round(age_h) + 'h)</span>';
-  return '<span class="pill pill-red">Stale (' + Math.round(age_h/24) + 'd)</span>';
+  const h = (Date.now() - new Date(iso)) / 3600000;
+  if (h < 25) return '<span class="pill pill-green">Fresh</span>';
+  if (h < 73) return '<span class="pill pill-amber">Aging (' + Math.round(h) + 'h)</span>';
+  return '<span class="pill pill-red">Stale (' + Math.round(h/24) + 'd)</span>';
 }
+function fmtRelTime(iso) {
+  if (!iso) return '';
+  const diff = new Date(iso) - Date.now();
+  if (diff <= 0) return 'any moment';
+  const h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
+  if (h > 24) return 'in ' + Math.round(h/24) + ' days';
+  if (h) return 'in ' + h + 'h ' + m + 'm';
+  return 'in ' + m + 'm';
+}
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({detail: r.statusText}));
+    throw new Error(e.detail || r.statusText);
+  }
+  return r.json();
+}
+function showAlert(elId, msg, type) {
+  const el = document.getElementById(elId);
+  el.className = 'alert alert-' + type;
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function hideAlert(elId) { document.getElementById(elId).style.display = 'none'; }
 
-async function load() {
+// ── public data ───────────────────────────────────────────────────────────
+async function loadPublic() {
   document.getElementById('refresh-ts').textContent = 'Refreshed: ' + new Date().toLocaleTimeString();
   try {
     const r = await fetch('./index.json?_=' + Date.now());
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    document.getElementById('err').style.display = 'none';
-
-    // Meta bar
+    hideAlert('pub-err');
     document.getElementById('gen-at').textContent =
-      'Generated: ' + fmt_date(d.generated_at) + '  |  Server version: ' + (d.server_version || '?');
-
-    // Stats
+      'Generated: ' + fmtDate(d.generated_at) + '  |  Server v' + (d.server_version||'?');
     const projs = Object.values(d.projects || {});
-    const total_items = projs.reduce((s, p) => s + (p.item_count || 0), 0);
-    const total_bytes = projs.reduce((s, p) => {
-      const v = p.variants || {};
-      return s + (v.data_only?.size_bytes || 0) + (v.with_images?.size_bytes || 0);
+    const totalItems = projs.reduce((s,p) => s+(p.item_count||0), 0);
+    const totalBytes = projs.reduce((s,p) => {
+      const v = p.variants||{};
+      return s + (v.data_only?.size_bytes||0) + (v.with_images?.size_bytes||0);
     }, 0);
-    document.getElementById('s-projects').innerHTML = projs.length;
+    document.getElementById('s-projects').textContent = projs.length;
     document.getElementById('s-projects').className = 'val';
-    document.getElementById('s-items').textContent = total_items.toLocaleString();
-    document.getElementById('s-size').textContent = fmt_size(total_bytes);
-    document.getElementById('s-master').textContent = fmt_size(d.master_db?.size_bytes);
-
-    // Projects table
-    const tbody = document.getElementById('proj-tbody');
-    if (!projs.length) {
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--gray);padding:24px">No projects cached yet</td></tr>';
-    } else {
-      tbody.innerHTML = projs.map(p => {
-        const v = p.variants || {};
-        const dl_data = v.data_only ? `<a class="dl-link" href="${v.data_only.file}" download>
-          &#11123; Data only <span class="size-note">${fmt_size(v.data_only.size_bytes)}</span></a>` : '';
-        const dl_img = v.with_images ? `<a class="dl-link" href="${v.with_images.file}" download>
-          &#11123; With images <span class="size-note">${fmt_size(v.with_images.size_bytes)}
-          ${v.with_images.image_count ? '· ' + v.with_images.image_count + ' imgs' : ''}</span></a>` : '';
-        return `<tr>
-          <td>
-            <div class="project-name">${p.name || '(unnamed)'}</div>
-            <div class="project-id">ID: ${p.id}</div>
-          </td>
-          <td>${(p.item_count || 0).toLocaleString()}</td>
-          <td>${fmt_date(p.last_sync)}</td>
-          <td>${age_pill(p.last_sync)}</td>
-          <td>${dl_data}${dl_img}</td>
-        </tr>`;
-      }).join('');
-    }
-
-    // Master DB card
-    const m = d.master_db || {};
+    document.getElementById('s-items').textContent = totalItems.toLocaleString();
+    document.getElementById('s-size').textContent = fmtSize(totalBytes);
+    document.getElementById('s-master').textContent = fmtSize(d.master_db?.size_bytes);
+    // Public projects table
+    const tbody = document.getElementById('pub-proj-tbody');
+    tbody.innerHTML = projs.length ? projs.map(p => {
+      const v = p.variants||{};
+      const dlD = v.data_only ? `<a class="dl-link" href="${v.data_only.file}" download>&#11123; Data only<span class="sz">${fmtSize(v.data_only.size_bytes)}</span></a>` : '';
+      const dlI = v.with_images ? `<a class="dl-link" href="${v.with_images.file}" download>&#11123; With images<span class="sz">${fmtSize(v.with_images.size_bytes)}${v.with_images.image_count?' &middot; '+v.with_images.image_count+' imgs':''}</span></a>` : '';
+      return `<tr><td><div class="proj-name">${p.name||'(unnamed)'}</div><div class="proj-id">ID: ${p.id}</div></td><td>${(p.item_count||0).toLocaleString()}</td><td>${fmtDate(p.last_sync)}</td><td>${agePill(p.last_sync)}</td><td>${dlD}${dlI}</td></tr>`;
+    }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--gray);padding:24px">No projects cached yet</td></tr>';
+    // Master DB
+    const m = d.master_db||{};
     document.getElementById('master-info').innerHTML =
-      `<b>File:</b> <a href="${m.file || 'master.db.gz'}">${m.file || 'master.db.gz'}</a> &nbsp;
-       <b>Size:</b> ${fmt_size(m.size_bytes)} &nbsp;
-       <b>Updated:</b> ${fmt_date(m.updated_at)}`;
-
+      `<b>File:</b> <a href="${m.file||'master.db.gz'}">${m.file||'master.db.gz'}</a> &nbsp;
+       <b>Size:</b> ${fmtSize(m.size_bytes)} &nbsp; <b>Updated:</b> ${fmtDate(m.updated_at)}`;
   } catch(e) {
-    document.getElementById('err').style.display = 'block';
-    document.getElementById('err').textContent = 'Error loading index.json: ' + e.message;
+    showAlert('pub-err', 'Error loading index.json: ' + e.message, 'err');
   }
 }
 
-load();
-setInterval(load, 60000);
+// ── auth ──────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  try {
+    const r = await fetch('/admin/auth-check');
+    if (r.status === 404) return; // static server — keep admin-btn hidden
+    document.getElementById('admin-btn').style.display = '';
+    const d = await r.json();
+    if (d.first_run) {
+      document.getElementById('setup-backdrop').style.display = 'flex';
+    } else if (d.authenticated) {
+      onAuthenticated();
+    }
+  } catch(_) { /* network error — keep admin-btn hidden */ }
+}
+function showLogin() {
+  document.getElementById('login-pw').value = '';
+  hideAlert('login-err');
+  document.getElementById('login-backdrop').style.display = 'flex';
+  setTimeout(() => document.getElementById('login-pw').focus(), 50);
+}
+function closeLogin() { document.getElementById('login-backdrop').style.display = 'none'; }
+async function doLogin() {
+  const pw = document.getElementById('login-pw').value;
+  if (!pw) return;
+  try {
+    await api('POST', '/admin/login', {password: pw});
+    closeLogin();
+    onAuthenticated();
+  } catch(e) {
+    showAlert('login-err', e.message, 'err');
+  }
+}
+async function doSetup() {
+  const pw = document.getElementById('setup-pw').value;
+  const pw2 = document.getElementById('setup-pw2').value;
+  if (!pw) return;
+  if (pw !== pw2) { showAlert('setup-err','Passwords do not match','err'); return; }
+  if (pw.length < 6) { showAlert('setup-err','Password must be at least 6 characters','err'); return; }
+  try {
+    await api('POST', '/admin/setup', {password: pw});
+    document.getElementById('setup-backdrop').style.display = 'none';
+    onAuthenticated();
+  } catch(e) {
+    showAlert('setup-err', e.message, 'err');
+  }
+}
+async function doLogout() {
+  await api('POST', '/admin/logout').catch(() => {});
+  document.getElementById('admin-panel').style.display = 'none';
+  document.getElementById('admin-user').style.display = 'none';
+  document.getElementById('admin-btn').textContent = '\uD83D\uDD12 Admin';
+  document.getElementById('admin-btn').onclick = showLogin;
+}
+function onAuthenticated() {
+  document.getElementById('admin-btn').style.display = 'none';
+  document.getElementById('admin-user').style.display = '';
+  document.getElementById('admin-panel').style.display = 'block';
+  loadAdminPanel();
+}
+
+// ── admin panel ───────────────────────────────────────────────────────────
+async function loadAdminPanel() {
+  try {
+    const d = await api('GET', '/admin/config');
+    renderAdminProjects(d.projects);
+    setSelectedSched(d.schedule);
+    document.getElementById('sched-time').value = d.schedule_time || '02:00';
+    const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
+    document.getElementById('next-sync-label').textContent = ns;
+  } catch(e) {
+    console.error('loadAdminPanel:', e);
+  }
+}
+function renderAdminProjects(projects) {
+  const tbody = document.getElementById('admin-proj-tbody');
+  if (!projects || !projects.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--gray);padding:16px">No projects configured. Add one above.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = projects.map(p => {
+    const status = p.synced ? agePill(p.last_sync) : '<span class="pill pill-blue">Not synced</span>';
+    return `<tr>
+      <td><div class="proj-name">${p.name||'Project '+p.id}</div><div class="proj-id">ID: ${p.id}</div></td>
+      <td>${p.item_count!=null ? p.item_count.toLocaleString() : '—'}</td>
+      <td>${fmtDate(p.last_sync)}</td>
+      <td>${status}</td>
+      <td><div class="act">
+        <button class="btn btn-sm btn-secondary" onclick="doSyncProject(${p.id})">&#8635; Sync</button>
+        <button class="btn btn-sm btn-danger" onclick="doRemoveProject(${p.id},'${(p.name||'Project '+p.id).replace(/'/g,"\\'")}')">&#10005; Remove</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── project management ────────────────────────────────────────────────────
+function showAddForm() {
+  document.getElementById('add-form').style.display = 'flex';
+  document.getElementById('add-pid').value = '';
+  hideAlert('add-result');
+  setTimeout(() => document.getElementById('add-pid').focus(), 50);
+}
+function hideAddForm() {
+  document.getElementById('add-form').style.display = 'none';
+  hideAlert('add-result');
+}
+async function doAddProject() {
+  const pid = parseInt(document.getElementById('add-pid').value);
+  if (!pid || pid <= 0) { showAlert('add-result','Enter a valid project ID','err'); return; }
+  try {
+    const d = await api('POST', '/admin/projects/add', {project_id: pid});
+    showAlert('add-result', d.message, 'ok');
+    hideAddForm();
+    if (d.syncing) startSyncStream();
+    setTimeout(loadAdminPanel, 1000);
+  } catch(e) { showAlert('add-result', e.message, 'err'); }
+}
+async function doRemoveProject(pid, name) {
+  if (!confirm(`Remove project "${name}" (ID ${pid}) from sync list?\n\nThis will also delete its .db.gz files from the server.`)) return;
+  try {
+    const d = await api('POST', '/admin/projects/remove', {project_id: pid});
+    loadAdminPanel();
+    loadPublic();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+async function doSyncProject(pid) {
+  try {
+    await api('POST', '/admin/sync/' + pid);
+    startSyncStream();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+async function doSyncAll() {
+  try {
+    await api('POST', '/admin/sync/all');
+    startSyncStream();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── sync log SSE ──────────────────────────────────────────────────────────
+let _sse = null;
+function startSyncStream() {
+  if (_sse) { _sse.close(); _sse = null; }
+  const card = document.getElementById('sync-log-card');
+  const pre = document.getElementById('sync-log-pre');
+  const badge = document.getElementById('sync-badge');
+  card.style.display = 'block';
+  pre.textContent = '';
+  badge.innerHTML = '<span class="pill pill-amber">&#9679; Running</span>';
+  card.scrollIntoView({behavior:'smooth', block:'nearest'});
+  _sse = new EventSource('/admin/sync/stream');
+  _sse.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'log') {
+      pre.textContent += msg.text + '\n';
+      pre.scrollTop = pre.scrollHeight;
+    } else if (msg.type === 'done') {
+      badge.innerHTML = msg.success
+        ? '<span class="pill pill-green">&#10003; Done</span>'
+        : '<span class="pill pill-red">&#10007; Failed</span>';
+      _sse.close(); _sse = null;
+      setTimeout(() => { loadPublic(); loadAdminPanel(); }, 800);
+    } else if (msg.type === 'idle') {
+      badge.innerHTML = '<span class="pill pill-blue">Idle</span>';
+      _sse.close(); _sse = null;
+    }
+  };
+  _sse.onerror = () => {
+    badge.innerHTML = '<span class="pill pill-red">Disconnected</span>';
+    if (_sse) { _sse.close(); _sse = null; }
+  };
+}
+function clearLog() {
+  document.getElementById('sync-log-pre').textContent = '';
+  document.getElementById('sync-log-card').style.display = 'none';
+}
+
+// ── schedule ──────────────────────────────────────────────────────────────
+let _selectedSched = 'biweekly';
+function selectSched(val) {
+  _selectedSched = val;
+  document.querySelectorAll('.sched-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.val === val);
+  });
+}
+function setSelectedSched(val) { selectSched(val || 'biweekly'); }
+async function saveSchedule() {
+  const t = document.getElementById('sched-time').value;
+  try {
+    const d = await api('POST', '/admin/schedule', {schedule: _selectedSched, schedule_time: t});
+    const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
+    document.getElementById('next-sync-label').textContent = ns;
+    showAlert('sched-result', 'Schedule saved: ' + d.label, 'ok');
+    setTimeout(() => hideAlert('sched-result'), 3000);
+  } catch(e) { showAlert('sched-result', e.message, 'err'); }
+}
+
+// ── password change ────────────────────────────────────────────────────────
+function showPwForm() {
+  document.getElementById('pw-form').style.display = 'block';
+  document.getElementById('curr-pw').value = '';
+  document.getElementById('new-pw').value = '';
+  hideAlert('pw-result');
+  setTimeout(() => document.getElementById('curr-pw').focus(), 50);
+}
+function hidePwForm() {
+  document.getElementById('pw-form').style.display = 'none';
+  hideAlert('pw-result');
+}
+async function doChangePw() {
+  const curr = document.getElementById('curr-pw').value;
+  const nw = document.getElementById('new-pw').value;
+  if (!curr || !nw) { showAlert('pw-result','Fill in both fields','err'); return; }
+  try {
+    const d = await api('POST', '/admin/password', {current: curr, new_password: nw});
+    showAlert('pw-result', d.message, 'ok');
+    setTimeout(doLogout, 2000);
+  } catch(e) { showAlert('pw-result', e.message, 'err'); }
+}
+
+// ── init ──────────────────────────────────────────────────────────────────
+loadPublic();
+setInterval(loadPublic, 60000);
+checkAuth();
 </script>
 </body>
 </html>
