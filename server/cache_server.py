@@ -307,6 +307,46 @@ class PasswordBody(BaseModel):
 class SyncBody(BaseModel):
     project_ids: Optional[list[int]] = None
 
+class SessionCookieBody(BaseModel):
+    jsessionid: str   # empty string = clear
+
+
+# ── .env helpers ─────────────────────────────────────────────────────────────
+
+def _read_env() -> dict[str, str]:
+    """Parse the .env file into a key→value dict."""
+    result: dict[str, str] = {}
+    if not _ENV_FILE.exists():
+        return result
+    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        result[key.strip()] = val.strip().strip('"').strip("'")
+    return result
+
+
+def _write_env_key(key: str, value: str) -> None:
+    """Update or insert a single key in the .env file, preserving all comments and ordering."""
+    if not _ENV_FILE.exists():
+        _ENV_FILE.write_text(f"{key}={value}\n", encoding="utf-8")
+        return
+    lines = _ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
+    found = False
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
+            new_lines.append(f"{key}={value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+    if not found:
+        new_lines.append(f"{key}={value}\n")
+    _ENV_FILE.write_text("".join(new_lines), encoding="utf-8")
+    logger.info(".env updated: %s=%s", key, "***" if "SECRET" in key or "COOKIE" in key else value)
+
 
 # ── admin API ─────────────────────────────────────────────────────────────────
 
@@ -529,6 +569,27 @@ def next_sync_info(_: None = Depends(_require_auth)):
         "schedule_time": cfg.get("schedule_time", "02:00"),
         "next_sync": _next_sync_at.isoformat() if _next_sync_at else None,
     }
+
+
+@app.get("/admin/session-cookie")
+def get_session_cookie(_: None = Depends(_require_auth)):
+    """Return JSESSIONID status — never the value itself."""
+    env = _read_env()
+    val = env.get("JAMA_SESSION_COOKIE", "").strip()
+    return {
+        "set": bool(val),
+        "hint": "Obtain from browser DevTools -> Application -> Cookies -> enphase.jamacloud.com. Expires ~8 h.",
+    }
+
+
+@app.post("/admin/session-cookie")
+def set_session_cookie(body: SessionCookieBody, _: None = Depends(_require_auth)):
+    """Save or clear JAMA_SESSION_COOKIE in .env.  Empty string clears it."""
+    jsid = body.jsessionid.strip()
+    _write_env_key("JAMA_SESSION_COOKIE", jsid)
+    action = "cleared" if not jsid else "saved"
+    logger.info("JSESSIONID %s by admin", action)
+    return {"ok": True, "set": bool(jsid), "message": f"Session cookie {action}"}
 
 
 @app.post("/admin/password")

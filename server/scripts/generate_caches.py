@@ -686,6 +686,35 @@ def _write_index_html(out_dir: Path) -> None:
     </div>
   </div>
 
+  <!-- Jama Session Cookie -->
+  <div class="card">
+    <div class="card-header">
+      &#127850; Jama Session Cookie (JSESSIONID)
+      <div class="hdr-actions">
+        <span id="jsid-status-badge"></span>
+      </div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:.85rem;color:var(--gray);margin-bottom:12px">
+        Required for syncing <b>browser-pasted inline images</b>. Expires every ~8 hours.<br>
+        Get it from: <code style="background:var(--bg);padding:1px 5px;border-radius:3px">Browser DevTools &rarr; Application &rarr; Cookies &rarr; enphase.jamacloud.com &rarr; JSESSIONID</code>
+      </p>
+      <div class="pw-form" id="jsid-form">
+        <div class="field">
+          <label>JSESSIONID value</label>
+          <input type="text" id="jsid-input" placeholder="Paste JSESSIONID value here"
+                 style="font-family:monospace;font-size:.82rem"
+                 onkeydown="if(event.key==='Enter')saveJsid()">
+        </div>
+        <div id="jsid-result" style="display:none;margin-bottom:10px"></div>
+        <div class="act">
+          <button class="btn btn-primary" onclick="saveJsid()">Save Cookie</button>
+          <button class="btn btn-danger" onclick="clearJsid()">Clear</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Security -->
   <div class="card">
     <div class="card-header">&#128274; Security</div>
@@ -872,6 +901,7 @@ async function loadAdminPanel() {
     document.getElementById('sched-time').value = d.schedule_time || '02:00';
     const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
     document.getElementById('next-sync-label').textContent = ns;
+    loadJsidStatus();
   } catch(e) {
     console.error('loadAdminPanel:', e);
   }
@@ -996,6 +1026,40 @@ async function saveSchedule() {
     showAlert('sched-result', 'Schedule saved: ' + d.label, 'ok');
     setTimeout(() => hideAlert('sched-result'), 3000);
   } catch(e) { showAlert('sched-result', e.message, 'err'); }
+}
+
+// ── session cookie (JSESSIONID) ───────────────────────────────────────────
+async function loadJsidStatus() {
+  try {
+    const d = await api('GET', '/admin/session-cookie');
+    const badge = document.getElementById('jsid-status-badge');
+    if (d.set) {
+      badge.innerHTML = '<span class="pill pill-green">&#10003; Cookie set</span>';
+    } else {
+      badge.innerHTML = '<span class="pill pill-amber">Not set — images skipped</span>';
+    }
+  } catch(_) {}
+}
+async function saveJsid() {
+  const val = document.getElementById('jsid-input').value.trim();
+  if (!val) { showAlert('jsid-result', 'Paste the JSESSIONID value first', 'err'); return; }
+  try {
+    const d = await api('POST', '/admin/session-cookie', {jsessionid: val});
+    document.getElementById('jsid-input').value = '';
+    showAlert('jsid-result', d.message + ' — will be used on next sync', 'ok');
+    loadJsidStatus();
+    setTimeout(() => hideAlert('jsid-result'), 4000);
+  } catch(e) { showAlert('jsid-result', e.message, 'err'); }
+}
+async function clearJsid() {
+  if (!confirm('Clear the JSESSIONID? Images will be skipped on the next sync.')) return;
+  try {
+    const d = await api('POST', '/admin/session-cookie', {jsessionid: ''});
+    document.getElementById('jsid-input').value = '';
+    showAlert('jsid-result', d.message, 'info');
+    loadJsidStatus();
+    setTimeout(() => hideAlert('jsid-result'), 3000);
+  } catch(e) { showAlert('jsid-result', e.message, 'err'); }
 }
 
 // ── password change ────────────────────────────────────────────────────────
