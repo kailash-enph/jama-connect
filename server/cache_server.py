@@ -83,7 +83,8 @@ _sessions: dict[str, datetime] = {}           # token -> expiry
 _sync_running: bool = False
 _sync_log: list[str] = []                     # rolling buffer (last 500 lines)
 _sync_subscribers: set[asyncio.Queue] = set()
-_next_sync_at: Optional[datetime] = None
+_next_sync_at: Optional[datetime] = None      # nearest upcoming sync across all projects
+_project_next_syncs: dict[int, Optional[datetime]] = {}  # per-project next sync time
 _scheduler_task: Optional[asyncio.Task] = None
 
 SESSION_LIFETIME = timedelta(hours=8)
@@ -213,7 +214,37 @@ async def run_sync(project_ids: Optional[list[int]] = None) -> bool:
 
 # ── background scheduler ──────────────────────────────────────────────────────
 
+def _get_project_schedule(cfg: dict[str, Any], pid: int) -> tuple[str, str]:
+    """Return (schedule, schedule_time) for a project.
+
+    Uses per-project override if set, otherwise falls back to the global default.
+    """
+    overrides: dict = cfg.get("project_schedules", {})
+    proj_cfg: dict = overrides.get(str(pid), {})
+    schedule    = proj_cfg.get("schedule")    or cfg.get("schedule", "biweekly")
+    sched_time  = proj_cfg.get("schedule_time") or cfg.get("schedule_time", "02:00")
+    return schedule, sched_time
+
+
+def _compute_next_sync_for_project(cfg: dict[str, Any], pid: int) -> Optional[datetime]:
+    """Compute the next scheduled sync datetime for a specific project."""
+    schedule, time_str = _get_project_schedule(cfg, pid)
+    interval = SCHEDULE_SECONDS.get(schedule, 0)
+    if not interval:
+        return None
+    try:
+        h, m = (int(x) for x in time_str.split(":"))
+    except Exception:
+        h, m = 2, 0
+    now = datetime.now(timezone.utc)
+    candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    while candidate <= now:
+        candidate += timedelta(seconds=interval)
+    return candidate
+
+
 def _compute_next_sync(cfg: dict[str, Any]) -> Optional[datetime]:
+    """Legacy: compute global next sync (used by the global schedule endpoint)."""
     schedule = cfg.get("schedule", "never")
     interval = SCHEDULE_SECONDS.get(schedule, 0)
     if not interval:
@@ -230,14 +261,34 @@ def _compute_next_sync(cfg: dict[str, Any]) -> Optional[datetime]:
     return candidate
 
 
+def _recompute_all_project_schedules(cfg: dict[str, Any]) -> None:
+    """Refresh _project_next_syncs and _next_sync_at from current config."""
+    global _project_next_syncs, _next_sync_at
+    pids = cfg.get("projects", [])
+    _project_next_syncs = {
+        pid: _compute_next_sync_for_project(cfg, pid) for pid in pids
+    }
+    upcoming = [t for t in _project_next_syncs.values() if t is not None]
+    _next_sync_at = min(upcoming) if upcoming else None
+
+
 async def _scheduler_loop() -> None:
-    global _next_sync_at
+    global _next_sync_at, _project_next_syncs
     while True:
         cfg = load_config()
-        _next_sync_at = _compute_next_sync(cfg)
+        pids = cfg.get("projects", [])
+
+        # Compute per-project next sync times
+        _project_next_syncs = {
+            pid: _compute_next_sync_for_project(cfg, pid) for pid in pids
+        }
+        upcoming = [t for t in _project_next_syncs.values() if t is not None]
+        _next_sync_at = min(upcoming) if upcoming else None
+
         if _next_sync_at is None:
             await asyncio.sleep(3600)
             continue
+
         wait_s = (_next_sync_at - datetime.now(timezone.utc)).total_seconds()
         if wait_s > 0:
             logger.info(
@@ -245,9 +296,18 @@ async def _scheduler_loop() -> None:
                 _next_sync_at.strftime("%Y-%m-%d %H:%M"), wait_s / 3600,
             )
             await asyncio.sleep(max(wait_s, 0))
-        logger.info("Scheduler: running sync for all configured projects")
-        await run_sync()
-        await asyncio.sleep(60)  # brief pause before recomputing next slot
+
+        # Sync only the projects that are due (within a 2-minute window)
+        now = datetime.now(timezone.utc)
+        due = [
+            pid for pid, t in _project_next_syncs.items()
+            if t is not None and (t - now).total_seconds() <= 120
+        ]
+        if due:
+            logger.info("Scheduler: running sync for project(s) %s", due)
+            await run_sync(due)
+
+        await asyncio.sleep(60)  # brief pause before recomputing
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -305,6 +365,10 @@ class RemoveProjectBody(BaseModel):
     project_id: int
 
 class ScheduleBody(BaseModel):
+    schedule: str
+
+class ProjectScheduleBody(BaseModel):
+    project_id: int
     schedule: str
     schedule_time: str = "02:00"
 
@@ -790,6 +854,9 @@ def admin_config(request: Request, _: None = Depends(_require_auth)):
     projects_out = []
     for pid in cfg.get("projects", []):
         p_data = index_projects.get(str(pid), {})
+        sched, sched_time = _get_project_schedule(cfg, pid)
+        next_sync = _project_next_syncs.get(pid)
+        has_override = str(pid) in cfg.get("project_schedules", {})
         projects_out.append({
             "id": pid,
             "name": p_data.get("name", f"Project {pid}"),
@@ -797,6 +864,11 @@ def admin_config(request: Request, _: None = Depends(_require_auth)):
             "last_sync": p_data.get("last_sync"),
             "variants": p_data.get("variants", {}),
             "synced": bool(p_data),
+            "schedule": sched,
+            "schedule_time": sched_time,
+            "schedule_label": SCHEDULE_LABELS.get(sched, ""),
+            "next_sync": next_sync.isoformat() if next_sync else None,
+            "schedule_is_global": not has_override,
         })
     return {
         "projects": projects_out,
@@ -922,7 +994,7 @@ async def sync_log_stream(request: Request):
 
 @app.post("/admin/schedule")
 def update_schedule(body: ScheduleBody, _: None = Depends(_require_auth)):
-    global _next_sync_at
+    """Update the global default schedule (applies to projects without a per-project override)."""
     if body.schedule not in SCHEDULE_SECONDS:
         raise HTTPException(400, f"Invalid schedule '{body.schedule}'. Valid: {list(SCHEDULE_SECONDS)}")
     try:
@@ -934,7 +1006,7 @@ def update_schedule(body: ScheduleBody, _: None = Depends(_require_auth)):
     cfg["schedule"] = body.schedule
     cfg["schedule_time"] = body.schedule_time
     save_config(cfg)
-    _next_sync_at = _compute_next_sync(cfg)
+    _recompute_all_project_schedules(cfg)
     return {
         "ok": True,
         "schedule": body.schedule,
@@ -943,14 +1015,50 @@ def update_schedule(body: ScheduleBody, _: None = Depends(_require_auth)):
     }
 
 
+@app.post("/admin/schedule/project")
+def update_project_schedule(body: ProjectScheduleBody, _: None = Depends(_require_auth)):
+    """Set a per-project schedule override. Pass schedule='never' to remove the auto-sync."""
+    if body.schedule not in SCHEDULE_SECONDS:
+        raise HTTPException(400, f"Invalid schedule. Valid: {list(SCHEDULE_SECONDS)}")
+    try:
+        h, m = (int(x) for x in body.schedule_time.split(":"))
+        assert 0 <= h < 24 and 0 <= m < 60
+    except Exception:
+        raise HTTPException(400, "Invalid schedule_time — use HH:MM (e.g. '02:00')")
+    cfg = load_config()
+    if body.project_id not in cfg.get("projects", []):
+        raise HTTPException(404, f"Project {body.project_id} is not in the configured list")
+    overrides: dict = cfg.setdefault("project_schedules", {})
+    overrides[str(body.project_id)] = {
+        "schedule": body.schedule,
+        "schedule_time": body.schedule_time,
+    }
+    save_config(cfg)
+    _recompute_all_project_schedules(cfg)
+    next_sync = _project_next_syncs.get(body.project_id)
+    return {
+        "ok": True,
+        "project_id": body.project_id,
+        "schedule": body.schedule,
+        "label": SCHEDULE_LABELS[body.schedule],
+        "schedule_time": body.schedule_time,
+        "next_sync": next_sync.isoformat() if next_sync else None,
+    }
+
+
 @app.get("/admin/schedule/next")
 def next_sync_info(_: None = Depends(_require_auth)):
     cfg = load_config()
+    per_project = {
+        str(pid): t.isoformat() if t else None
+        for pid, t in _project_next_syncs.items()
+    }
     return {
         "schedule": cfg.get("schedule", "biweekly"),
         "label": SCHEDULE_LABELS.get(cfg.get("schedule", "biweekly"), ""),
         "schedule_time": cfg.get("schedule_time", "02:00"),
         "next_sync": _next_sync_at.isoformat() if _next_sync_at else None,
+        "per_project": per_project,
     }
 
 

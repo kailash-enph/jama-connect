@@ -719,10 +719,10 @@ def _write_index_html(out_dir: Path) -> None:
       <div style="overflow-x:auto">
         <table id="admin-proj-table">
           <thead><tr>
-            <th>Project</th><th>Items</th><th>Last Sync</th><th>Status</th><th>Actions</th>
+            <th>Project</th><th>Items</th><th>Last Sync</th><th>Status</th><th>Schedule</th><th>Actions</th>
           </tr></thead>
           <tbody id="admin-proj-tbody">
-            <tr><td colspan="5" style="text-align:center;color:var(--gray);padding:16px">
+            <tr><td colspan="6" style="text-align:center;color:var(--gray);padding:16px">
               <span class="spinner"></span> Loading...
             </td></tr>
           </tbody>
@@ -830,7 +830,11 @@ def _write_index_html(out_dir: Path) -> None:
 
   <!-- Schedule -->
   <div class="card">
-    <div class="card-header">&#9200; Auto-Sync Schedule</div>
+    <div class="card-header">&#9200; Default Auto-Sync Schedule
+      <div class="hdr-actions">
+        <span style="font-size:.78rem;color:var(--gray)">Fallback for projects without a per-project override</span>
+      </div>
+    </div>
     <div class="card-body">
       <div class="sched-grid" id="sched-grid">
         <div class="sched-card" data-val="daily" onclick="selectSched('daily')">
@@ -1053,31 +1057,95 @@ async function loadAdminPanel() {
     updateImgPidDropdown(d.projects);
     setSelectedSched(d.schedule);
     document.getElementById('sched-time').value = d.schedule_time || '02:00';
-    const ns = d.next_sync ? `Next sync: ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})` : 'No scheduled sync';
+    const ns = d.next_sync
+      ? `Next sync (any project): ${fmtDate(d.next_sync)} (${fmtRelTime(d.next_sync)})`
+      : 'No scheduled syncs';
     document.getElementById('next-sync-label').textContent = ns;
   } catch(e) {
     console.error('loadAdminPanel:', e);
   }
 }
+const SCHED_OPTIONS = [
+  {val:'daily',    label:'Daily'},
+  {val:'biweekly', label:'Every 3 days'},
+  {val:'weekly',   label:'Weekly'},
+  {val:'monthly',  label:'Monthly'},
+  {val:'never',    label:'Manual only'},
+];
+function schedOptions(selected) {
+  return SCHED_OPTIONS.map(o =>
+    `<option value="${o.val}"${o.val===selected?' selected':''}>${o.label}</option>`
+  ).join('');
+}
+
 function renderAdminProjects(projects) {
   const tbody = document.getElementById('admin-proj-tbody');
   if (!projects || !projects.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--gray);padding:16px">No projects configured. Add one above.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--gray);padding:16px">No projects configured. Add one above.</td></tr>';
     return;
   }
   tbody.innerHTML = projects.map(p => {
     const status = p.synced ? agePill(p.last_sync) : '<span class="pill pill-blue">Not synced</span>';
+    const nextLbl = p.next_sync
+      ? `<div style="font-size:.72rem;color:var(--gray);margin-top:2px">Next: ${fmtRelTime(p.next_sync)}</div>`
+      : '';
+    const globalBadge = p.schedule_is_global
+      ? `<span style="font-size:.68rem;color:var(--gray);margin-left:4px">(default)</span>`
+      : '';
+    const schedCell = `
+      <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="ps-sched-${p.id}"
+            style="padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:.8rem;flex:1">
+            ${schedOptions(p.schedule||'biweekly')}
+          </select>
+          <input type="time" id="ps-time-${p.id}" value="${p.schedule_time||'02:00'}"
+            style="width:90px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:.8rem">
+        </div>
+        <div style="display:flex;align-items:center;gap:4px">
+          <button class="btn btn-sm btn-secondary" style="padding:2px 8px;font-size:.76rem"
+            onclick="saveProjectSchedule(${p.id})">Save</button>
+          ${globalBadge}
+        </div>
+        ${nextLbl}
+      </div>`;
     return `<tr>
       <td><div class="proj-name">${p.name||'Project '+p.id}</div><div class="proj-id">ID: ${p.id}</div></td>
       <td>${p.item_count!=null ? p.item_count.toLocaleString() : '—'}</td>
       <td>${fmtDate(p.last_sync)}</td>
       <td>${status}</td>
+      <td>${schedCell}</td>
       <td><div class="act">
         <button class="btn btn-sm btn-secondary" onclick="doSyncProject(${p.id})">&#8635; Sync</button>
         <button class="btn btn-sm btn-danger" onclick="doRemoveProject(${p.id},'${(p.name||'Project '+p.id).replace(/'/g,"\\'")}')">&#10005; Remove</button>
       </div></td>
     </tr>`;
   }).join('');
+}
+
+// ── per-project schedule ──────────────────────────────────────────────────
+async function saveProjectSchedule(pid) {
+  const sched = document.getElementById(`ps-sched-${pid}`)?.value;
+  const time  = document.getElementById(`ps-time-${pid}`)?.value || '02:00';
+  if (!sched) return;
+  const btn = event.target;
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const d = await api('POST', '/admin/schedule/project', {
+      project_id: pid, schedule: sched, schedule_time: time
+    });
+    btn.textContent = '✓';
+    // Refresh the project list so next-sync label and badge update
+    setTimeout(async () => {
+      btn.disabled = false; btn.textContent = orig;
+      const cfg = await api('GET', '/admin/config');
+      renderAdminProjects(cfg.projects);
+    }, 1000);
+  } catch(e) {
+    btn.disabled = false; btn.textContent = orig;
+    alert('Failed: ' + (e.message || e));
+  }
 }
 
 // ── project management ────────────────────────────────────────────────────
