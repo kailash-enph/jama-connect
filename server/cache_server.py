@@ -540,27 +540,31 @@ def _generate_browser_script(
 // Generated: {ts}  |  Token expires in 30 minutes
 // Paste into DevTools console on {jama_url} (must be logged in)
 (async () => {{
-  const SERVER     = '{server_url}';
-  const TOKEN      = '{token}';
-  const PID        = {project_id};
-  const IMGS       = {images_json};
+  const SERVER   = '{server_url}';
+  const TOKEN    = '{token}';
+  const PID      = {project_id};
+  const IMGS     = {images_json};
 
   // ── tuning knobs ──────────────────────────────────────────────────
-  const DELAY_MS   = 300;   // ms between every request  (raise if still blocked)
-  const JITTER_MS  = 150;   // random extra delay per request (smooths bursts)
-  const BATCH_SZ   = 40;    // images per upload batch
-  const MAX_RETRY  = 4;     // retries on 429 / 5xx
+  const CONCUR     = 40;    // images fetched in parallel
+  const BATCH_SZ   = 40;    // images per upload batch to this server
+  const MAX_RETRY  = 4;     // retries on 429 / 5xx from Jama
   const RETRY_BASE = 3000;  // ms for first retry backoff (doubles each attempt)
+  const PAUSE_MS   = 200;   // ms pause between parallel download chunks
   // ─────────────────────────────────────────────────────────────────
+
+  // console.clear() removes any pre-existing page errors (e.g. RUM telemetry)
+  // so our output is the first thing visible in the console.
+  console.clear();
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const style = (bg, fg='#fff') =>
     `background:${{bg}};color:${{fg}};padding:2px 6px;border-radius:3px;font-weight:bold`;
 
   console.log('%c Jama Image Sync ', style('#0066cc'),
-    `${{IMGS.length}} image(s) — ${{DELAY_MS}}ms delay — batch size ${{BATCH_SZ}}`);
+    `${{IMGS.length}} image(s) — ${{CONCUR}} concurrent`);
 
-  // Fetch one URL with retry on 429 / 5xx
+  // Fetch one attachment URL with exponential-backoff retry on 429 / 5xx
   async function fetchImg(url) {{
     for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {{
       let r;
@@ -580,39 +584,40 @@ def _generate_browser_script(
     }}
   }}
 
-  const results = []; let ok = 0, fail = 0, skip = 0;
+  // Download CONCUR images at a time using Promise.allSettled
+  const results = [];
+  let ok = 0, fail = 0, skip = 0;
 
-  for (let i = 0; i < IMGS.length; i++) {{
-    const {{att_id, fname}} = IMGS[i];
-    const url = `/attachment/${{att_id}}/${{fname}}`;
-    try {{
-      const r = await fetchImg(url);
-      if (r.status === 403 || r.status === 404) {{ skip++; }}
-      else if (!r.ok) {{ console.warn(`  HTTP ${{r.status}} — ${{fname}}`); fail++; }}
-      else {{
-        const blob = await r.blob();
-        const b64  = await new Promise(res => {{
-          const fr = new FileReader();
-          fr.onload  = () => res(fr.result.split(',')[1]);
-          fr.readAsDataURL(blob);
-        }});
-        results.push({{ att_id, fname, mime: blob.type || 'image/png', data_b64: b64 }});
-        ok++;
-      }}
-    }} catch(e) {{ console.error(`  Error ${{fname}}:`, e.message); fail++; }}
+  for (let b = 0; b < IMGS.length; b += CONCUR) {{
+    const chunk = IMGS.slice(b, b + CONCUR);
+    const settled = await Promise.allSettled(chunk.map(async ({{att_id, fname}}) => {{
+      const r = await fetchImg(`/attachment/${{att_id}}/${{fname}}`);
+      if (r.status === 403 || r.status === 404) {{ skip++; return null; }}
+      if (!r.ok) {{ fail++; return null; }}
+      const blob = await r.blob();
+      const b64  = await new Promise(res => {{
+        const fr = new FileReader();
+        fr.onload  = () => res(fr.result.split(',')[1]);
+        fr.readAsDataURL(blob);
+      }});
+      ok++;
+      return {{ att_id, fname, mime: blob.type || 'image/png', data_b64: b64 }};
+    }}));
 
-    if ((i + 1) % 20 === 0 || i === IMGS.length - 1)
-      console.log(`  ${{i+1}}/${{IMGS.length}} — ok:${{ok}} skip:${{skip}} fail:${{fail}}`);
+    for (const s of settled) {{
+      if (s.status === 'rejected') {{ fail++; }}
+      else if (s.value) results.push(s.value);
+    }}
 
-    // Polite delay (skip after last item)
-    if (i < IMGS.length - 1)
-      await sleep(DELAY_MS + Math.random() * JITTER_MS);
+    const done = Math.min(b + CONCUR, IMGS.length);
+    console.log(`  ${{done}}/${{IMGS.length}} — ok:${{ok}} skip:${{skip}} fail:${{fail}}`);
+    if (b + CONCUR < IMGS.length) await sleep(PAUSE_MS);
   }}
 
   console.log(`Fetch done: ${{ok}} fetched, ${{skip}} not found, ${{fail}} failed.`);
   if (!results.length) {{ console.warn('Nothing to upload.'); return; }}
 
-  // Upload in batches so the payload stays manageable
+  // Upload in batches so each request payload stays manageable
   const batches = [];
   for (let i = 0; i < results.length; i += BATCH_SZ)
     batches.push(results.slice(i, i + BATCH_SZ));
