@@ -652,44 +652,78 @@ def _write_index_html(out_dir: Path) -> None:
     <div class="card-header">
       &#128444; Browser Image Sync
       <div class="hdr-actions">
-        <span style="font-size:.78rem;color:var(--green);font-weight:600">No JSESSIONID stored server-side</span>
+        <span style="font-size:.78rem;color:var(--green);font-weight:600">&#10003; No JSESSIONID stored server-side</span>
       </div>
     </div>
     <div class="card-body">
-      <p style="font-size:.85rem;color:var(--gray);margin-bottom:14px">
-        Fetches browser-pasted inline images directly from your logged-in Jama session
-        — no session cookie is ever sent to this server. A short-lived upload token
-        (30 min, single-use) authorises the image upload only.
-      </p>
-      <div class="add-form" style="margin-bottom:12px">
-        <div class="af-field">
-          <label>Project</label>
+
+      <!-- Intro row: SSO note + project selector + generate button -->
+      <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
+        <div style="flex:0 0 220px">
+          <label style="display:block;font-size:.8rem;font-weight:600;color:var(--gray);margin-bottom:4px">Project</label>
           <select id="img-pid"
                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:.88rem;width:100%">
             <option value="">Select project...</option>
           </select>
         </div>
-        <button class="btn btn-primary" onclick="genImgScript()">Generate Script</button>
+        <button id="img-gen-btn" class="btn btn-primary" onclick="genImgScript(this)">
+          &#128203; Generate &amp; Copy Script
+        </button>
       </div>
-      <div id="img-result" style="display:none;margin-bottom:10px"></div>
-      <div id="img-script-area" style="display:none">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span style="font-size:.82rem;color:var(--gray)">
-            Paste into <b>DevTools console</b> on <code style="background:var(--bg);padding:1px 4px;border-radius:3px">enphase.jamacloud.com</code> (must be logged in)
-          </span>
-          <button class="btn btn-sm btn-secondary" onclick="copyImgScript(this)">Copy</button>
+
+      <p style="font-size:.82rem;color:var(--gray);margin-bottom:16px">
+        Uses your <b>Microsoft SSO session</b> — Jama auto-logs in through your existing
+        browser session, no credentials needed. The script only uploads image data,
+        never cookies.
+      </p>
+
+      <!-- Steps (shown after generate) -->
+      <div id="img-steps" style="display:none">
+
+        <!-- Step banners -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px">
+          <div style="border:2px solid var(--green);border-radius:var(--radius);padding:12px;background:#dafbe1">
+            <div style="font-size:.75rem;font-weight:700;color:var(--green);margin-bottom:4px">STEP 1 &#10003;</div>
+            <div style="font-size:.85rem;font-weight:600">Script copied<br>to clipboard</div>
+            <div style="font-size:.75rem;color:var(--green);margin-top:4px">Token: <span id="img-countdown">30:00</span></div>
+          </div>
+          <div style="border:2px solid var(--blue);border-radius:var(--radius);padding:12px;background:var(--blue-light)">
+            <div style="font-size:.75rem;font-weight:700;color:var(--blue);margin-bottom:4px">STEP 2</div>
+            <div style="font-size:.85rem;font-weight:600;margin-bottom:8px">Open Jama in browser</div>
+            <button class="btn btn-primary btn-sm" onclick="openJama()" style="width:100%">
+              &#8599; Open Jama
+            </button>
+          </div>
+          <div style="border:2px solid var(--border);border-radius:var(--radius);padding:12px;background:var(--bg)">
+            <div style="font-size:.75rem;font-weight:700;color:var(--gray);margin-bottom:4px">STEP 3</div>
+            <div style="font-size:.85rem;color:#24292f">
+              Press <kbd style="background:#eee;border:1px solid #ccc;border-radius:3px;padding:1px 5px;font-size:.8rem">F12</kbd>
+              &rarr; <b>Console</b><br>
+              <kbd style="background:#eee;border:1px solid #ccc;border-radius:3px;padding:1px 5px;font-size:.8rem">Ctrl+V</kbd>
+              then
+              <kbd style="background:#eee;border:1px solid #ccc;border-radius:3px;padding:1px 5px;font-size:.8rem">Enter</kbd>
+            </div>
+          </div>
         </div>
-        <textarea id="img-script-text" readonly class="log-pre"
-                  style="width:100%;height:200px;resize:vertical;cursor:text;white-space:pre"></textarea>
-        <div class="alert alert-info" style="margin-top:10px;font-size:.82rem;line-height:1.6">
-          <b>How to use:</b><br>
-          1. Open <code>enphase.jamacloud.com</code> in your browser while logged in<br>
-          2. Press <b>F12</b> &rarr; <b>Console</b> tab<br>
-          3. Paste the script and press <b>Enter</b><br>
-          4. The script fetches images from Jama (same-origin, your session) and uploads them here automatically<br>
-          5. Token expires in <b>30 minutes</b> &mdash; click Generate Script again if needed
-        </div>
-      </div>
+
+        <!-- Script reveal (collapsed by default) -->
+        <details style="margin-bottom:8px">
+          <summary style="font-size:.82rem;color:var(--gray);cursor:pointer;user-select:none">
+            &#128196; Show / copy script manually
+          </summary>
+          <div style="margin-top:8px">
+            <textarea id="img-script-text" readonly class="log-pre"
+                      style="width:100%;height:160px;resize:vertical;cursor:text;white-space:pre"></textarea>
+            <button class="btn btn-sm btn-secondary" style="margin-top:6px"
+                    onclick="copyImgScript(this)">Copy to clipboard</button>
+          </div>
+        </details>
+
+        <div id="img-upload-ok" class="alert alert-ok" style="display:none;margin-top:8px"></div>
+
+      </div><!-- /img-steps -->
+
+      <div id="img-result" style="display:none;margin-top:8px"></div>
     </div>
   </div>
 
@@ -1056,18 +1090,26 @@ function clearLog() {
 }
 
 // ── browser image sync ────────────────────────────────────────────────────
+let _imgTokenExpiry = null;
+let _imgCountdownTimer = null;
+let _jamaDomain = 'https://enphase.jamacloud.com';
+
 function updateImgPidDropdown(projects) {
   const sel = document.getElementById('img-pid');
   const curr = sel.value;
+  const synced = (projects||[]).filter(p => p.synced);
   sel.innerHTML = '<option value="">Select project...</option>' +
-    (projects||[]).filter(p=>p.synced).map(p =>
+    synced.map(p =>
       `<option value="${p.id}"${p.id==curr?' selected':''}>${p.name||'Project '+p.id} (ID: ${p.id})</option>`
     ).join('');
-  if (!sel.querySelector('[selected]') && curr) sel.value = '';
+  // Auto-select if only one project
+  if (synced.length === 1 && !curr) sel.value = synced[0].id;
 }
-async function genImgScript() {
+
+async function genImgScript(btn) {
   const pid = document.getElementById('img-pid').value;
   if (!pid) { showAlert('img-result','Select a project first','err'); return; }
+  btn.disabled = true; btn.textContent = 'Generating...';
   try {
     const r = await fetch(`/admin/image-sync/script?project_id=${pid}`);
     if (!r.ok) {
@@ -1075,25 +1117,60 @@ async function genImgScript() {
       throw new Error(e.detail || r.statusText);
     }
     const script = await r.text();
+    // Extract Jama URL from script for "Open Jama" button
+    const m = script.match(/Paste into DevTools console on (https?:\/\/[^\s]+)/);
+    if (m) _jamaDomain = m[1];
+
     document.getElementById('img-script-text').value = script;
-    document.getElementById('img-script-area').style.display = 'block';
+
+    // Auto-copy to clipboard
+    await navigator.clipboard.writeText(script).catch(() => {
+      const ta = document.getElementById('img-script-text');
+      ta.select(); document.execCommand('copy');
+    });
+
+    // Show steps, start countdown
+    document.getElementById('img-steps').style.display = 'block';
+    document.getElementById('img-upload-ok').style.display = 'none';
     hideAlert('img-result');
-    document.getElementById('img-script-area').scrollIntoView({behavior:'smooth',block:'nearest'});
+    _imgTokenExpiry = Date.now() + 30 * 60 * 1000;
+    _startImgCountdown();
+
+    document.getElementById('img-steps').scrollIntoView({behavior:'smooth',block:'nearest'});
+    btn.textContent = '&#10003; Script Copied — Regenerate';
   } catch(e) {
     showAlert('img-result', e.message, 'err');
-    document.getElementById('img-script-area').style.display = 'none';
+    btn.textContent = 'Generate & Copy Script';
   }
+  btn.disabled = false;
 }
+
+function _startImgCountdown() {
+  if (_imgCountdownTimer) clearInterval(_imgCountdownTimer);
+  _imgCountdownTimer = setInterval(() => {
+    const left = Math.max(0, _imgTokenExpiry - Date.now());
+    const m = String(Math.floor(left/60000)).padStart(2,'0');
+    const s = String(Math.floor((left%60000)/1000)).padStart(2,'0');
+    const el = document.getElementById('img-countdown');
+    if (el) el.textContent = `${m}:${s}`;
+    if (left === 0) { clearInterval(_imgCountdownTimer); _imgCountdownTimer = null; }
+  }, 1000);
+}
+
+function openJama() {
+  window.open(_jamaDomain, '_blank');
+}
+
 function copyImgScript(btn) {
   const text = document.getElementById('img-script-text').value;
   navigator.clipboard.writeText(text).then(() => {
     btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = 'Copy', 2000);
+    setTimeout(() => btn.textContent = 'Copy to clipboard', 2000);
   }).catch(() => {
     document.getElementById('img-script-text').select();
     document.execCommand('copy');
     btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = 'Copy', 2000);
+    setTimeout(() => btn.textContent = 'Copy to clipboard', 2000);
   });
 }
 
