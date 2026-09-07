@@ -6,6 +6,9 @@
 #   docker build -f server/Dockerfile -t jama-cache-api .
 #
 # docker-compose.yml sets the context correctly — no manual build needed.
+#
+# For a self-contained deployment (no repo needed), use build_zip.py to
+# produce a zip archive with a pre-built wheel and a standalone Dockerfile.
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.12-slim
@@ -15,7 +18,7 @@ RUN useradd -m -u 1000 jama
 WORKDIR /app
 
 # ── Install Python dependencies ───────────────────────────────────────────────
-# 1. jama_mcp_v2 — required by generate_caches.py (sync subprocess)
+# jama_mcp_v2 — required by generate_caches.py (sync subprocess)
 COPY client/backend/pyproject.toml client/backend/
 COPY client/backend/src/           client/backend/src/
 RUN pip install --no-cache-dir ./client/backend
