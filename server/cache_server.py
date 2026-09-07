@@ -753,9 +753,9 @@ def remove_project(body: RemoveProjectBody, _: None = Depends(_require_auth)):
     pids.remove(body.project_id)
     cfg["projects"] = pids
     save_config(cfg)
-    # Delete .db.gz files
+    # Delete all .db.gz variants for this project
     deleted: list[str] = []
-    for suffix in ("", "_with_images"):
+    for suffix in ("", "_images", "_with_images"):
         p = _DATA_DIR / "projects" / f"{body.project_id}{suffix}.db.gz"
         if p.exists():
             p.unlink()

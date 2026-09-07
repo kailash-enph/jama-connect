@@ -412,6 +412,30 @@ def _write_index_html(out_dir: Path) -> None:
     --border:#d0d7de; --bg:#f6f8fa; --card:#ffffff;
     --radius:8px; --shadow:0 1px 4px rgba(0,0,0,.1);
   }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --blue:#4a9eff; --blue-light:#1a2d4a; --blue-dark:#5aaeff;
+      --green:#3fb950; --amber:#e3b341; --red:#f85149; --gray:#8b949e;
+      --border:#30363d; --bg:#0d1117; --card:#161b22;
+      --shadow:0 1px 4px rgba(0,0,0,.4);
+    }
+    body{color:#e6edf3}
+    th{color:#8b949e}
+    tr:hover td{background:#1f2937}
+    .section-div span{color:#e6edf3}
+    .section-div::before{background:linear-gradient(to right,#4a9eff,#30363d)}
+    .section-div::after{background:linear-gradient(to left,#4a9eff,#30363d)}
+    input[type=text],input[type=number],input[type=password],input[type=time]{
+      background:#0d1117;color:#e6edf3;border-color:#30363d}
+    kbd{background:#21262d!important;border-color:#30363d!important;color:#c9d1d9}
+    .pill-green{background:#0f2a1a}
+    .pill-amber{background:#2e2000}
+    .pill-red{background:#2a0f0f}
+    .pill-blue{background:#1a2d4a}
+    .sched-card{border-color:#30363d}
+    .sched-card:hover,.sched-card.active{border-color:#4a9eff;background:#1a2d4a}
+    .add-form,.pw-form{background:#0d1117;border-color:#30363d}
+  }
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
        background:var(--bg);color:#24292f;line-height:1.5;padding:24px}
@@ -903,7 +927,7 @@ async function loadPublic() {
     const totalItems = projs.reduce((s,p) => s+(p.item_count||0), 0);
     const totalBytes = projs.reduce((s,p) => {
       const v = p.variants||{};
-      return s + (v.data_only?.size_bytes||0) + (v.with_images?.size_bytes||0);
+      return s + (v.data_only?.size_bytes||0) + (v.images?.size_bytes||0) + (v.with_images?.size_bytes||0);
     }, 0);
     document.getElementById('s-projects').textContent = projs.length;
     document.getElementById('s-projects').className = 'val';
@@ -914,9 +938,10 @@ async function loadPublic() {
     const tbody = document.getElementById('pub-proj-tbody');
     tbody.innerHTML = projs.length ? projs.map(p => {
       const v = p.variants||{};
-      const dlD = v.data_only ? `<a class="dl-link" href="${v.data_only.file}" download>&#11123; Data only<span class="sz">${fmtSize(v.data_only.size_bytes)}</span></a>` : '';
-      const dlI = v.with_images ? `<a class="dl-link" href="${v.with_images.file}" download>&#11123; With images<span class="sz">${fmtSize(v.with_images.size_bytes)}${v.with_images.image_count?' &middot; '+v.with_images.image_count+' imgs':''}</span></a>` : '';
-      return `<tr><td><div class="proj-name">${p.name||'(unnamed)'}</div><div class="proj-id">ID: ${p.id}</div></td><td>${(p.item_count||0).toLocaleString()}</td><td>${fmtDate(p.last_sync)}</td><td>${agePill(p.last_sync)}</td><td>${dlD}${dlI}</td></tr>`;
+      const dlD   = v.data_only   ? `<a class="dl-link" href="${v.data_only.file}" download>&#11123; Data<span class="sz">${fmtSize(v.data_only.size_bytes)}</span></a>` : '';
+      const dlImg = v.images      ? `<a class="dl-link" href="${v.images.file}" download>&#11123; Images<span class="sz">${fmtSize(v.images.size_bytes)}${v.images.image_count?' &middot; '+v.images.image_count+' imgs':''}</span></a>` : '';
+      const dlAll = v.with_images ? `<a class="dl-link" href="${v.with_images.file}" download>&#11123; +All<span class="sz">${fmtSize(v.with_images.size_bytes)}${v.with_images.image_count?' &middot; '+v.with_images.image_count+' imgs':''}</span></a>` : '';
+      return `<tr><td><div class="proj-name">${p.name||'(unnamed)'}</div><div class="proj-id">ID: ${p.id}</div></td><td>${(p.item_count||0).toLocaleString()}</td><td>${fmtDate(p.last_sync)}</td><td>${agePill(p.last_sync)}</td><td>${dlD}${dlImg}${dlAll}</td></tr>`;
     }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--gray);padding:24px">No projects cached yet</td></tr>';
     // Master DB
     const m = d.master_db||{};

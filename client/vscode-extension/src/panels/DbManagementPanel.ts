@@ -86,6 +86,14 @@ export class DbManagementPanel {
       } catch (e) {
         this._panel.webview.postMessage({ type: "error", message: String(e) });
       }
+    } else if (msg.type === "deleteImages") {
+      const projectId = msg.projectId as number;
+      try {
+        await fetch(`${baseUrl}/api/db/project/${projectId}/images`, { method: "DELETE" });
+        this._panel.webview.postMessage({ type: "deleted", projectId });
+      } catch (e) {
+        this._panel.webview.postMessage({ type: "error", message: String(e) });
+      }
     }
   }
 
@@ -100,18 +108,64 @@ export class DbManagementPanel {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' ${this._panel.webview.cspSource}; connect-src http://localhost:*;">
   <script src="${toolkitUri}"></script>
   <style>
-    body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 20px; }
+    /* ── Layout uses VS Code CSS variables so dark/light adapts automatically ── */
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      padding: 20px;
+    }
     h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
     .subtitle { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 20px; }
     .grid-wrap { margin-top: 12px; }
-    .row { display: grid; grid-template-columns: 2fr 1.5fr 1.5fr 1.5fr 1fr; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--vscode-panel-border); font-size: 13px; }
-    .row.header { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--vscode-descriptionForeground); padding-bottom: 4px; }
+    .row {
+      display: grid;
+      grid-template-columns: 2fr 2fr 1fr 1.5fr 1.5fr;
+      gap: 8px;
+      align-items: start;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      font-size: 13px;
+    }
+    .row.header {
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--vscode-descriptionForeground);
+      padding-bottom: 6px;
+      align-items: center;
+    }
     .project-name { font-weight: 500; }
-    .project-id { font-size: 11px; color: var(--vscode-descriptionForeground); }
-    .status-none { color: var(--vscode-descriptionForeground); font-style: italic; }
-    .status-downloaded { color: var(--vscode-testing-iconPassed, #73c991); font-weight: 500; }
-    .actions { display: flex; gap: 4px; flex-wrap: wrap; }
-    .progress-row { padding: 8px; background: var(--vscode-editorWidget-background); border-radius: 4px; margin-top: 4px; display: none; align-items: center; gap: 8px; font-size: 12px; }
+    .project-id   { font-size: 11px; color: var(--vscode-descriptionForeground); }
+    /* "local only" pill shown when a project isn't on the server */
+    .local-only-badge {
+      display: inline-block;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 10px;
+      background: var(--vscode-badge-background, #3794ff);
+      color: var(--vscode-badge-foreground, #ffffff);
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .status-none    { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 12px; }
+    .status-ok      { color: var(--vscode-testing-iconPassed, #73c991); font-size: 12px; }
+    .status-lbl     { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 1px; }
+    .imgs-row       { margin-top: 4px; }
+    .variant-info   { font-size: 11px; color: var(--vscode-descriptionForeground); line-height: 1.7; }
+    .actions        { display: flex; gap: 4px; flex-wrap: wrap; align-items: flex-start; }
+    .progress-row {
+      padding: 8px;
+      background: var(--vscode-editorWidget-background);
+      border-radius: 4px;
+      margin-top: 8px;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
     .progress-row.visible { display: flex; }
     #errorMsg { color: var(--vscode-errorForeground); font-size: 12px; margin-top: 8px; display: none; }
   </style>
@@ -126,12 +180,14 @@ export class DbManagementPanel {
   <div class="grid-wrap">
     <div class="row header">
       <span>Project</span>
-      <span>Local Status</span>
+      <span>Local DB</span>
       <span>Last Sync</span>
       <span>Server Variants</span>
       <span>Actions</span>
     </div>
-    <div id="projectRows"><p style="color:var(--vscode-descriptionForeground);padding:16px 0">Loading...</p></div>
+    <div id="projectRows">
+      <p style="color:var(--vscode-descriptionForeground);padding:16px 0">Loading...</p>
+    </div>
   </div>
   <div class="progress-row" id="progressRow">
     <vscode-progress-ring></vscode-progress-ring>
@@ -143,22 +199,25 @@ export class DbManagementPanel {
     function send(msg) { vscode.postMessage(msg); }
     function refresh() { send({ type: 'getStatus' }); }
 
-    function formatBytes(b) {
-      if (!b) return '\u2014';
-      if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
-      return (b / (1024 * 1024)).toFixed(1) + ' MB';
+    // Cached project names so download progress can show a label
+    let _projectNames = {};
+
+    function fmtBytes(b) {
+      if (!b && b !== 0) return '\u2014';
+      if (b < 1024 * 1024) return (b / 1024).toFixed(0) + '\u202fKB';
+      return (b / (1024 * 1024)).toFixed(1) + '\u202fMB';
     }
-    function formatDate(s) {
+    function fmtDate(s) {
       if (!s) return '\u2014';
       try { return new Date(s).toLocaleDateString(); } catch { return s; }
     }
 
     window.addEventListener('message', e => {
       const msg = e.data;
-      if (msg.type === 'statusData') renderProjects(msg.local, msg.index);
-      else if (msg.type === 'error') showError(msg.message);
+      if (msg.type === 'statusData')       renderProjects(msg.local, msg.index);
+      else if (msg.type === 'error')        showError(msg.message);
       else if (msg.type === 'downloadProgress') updateProgress(msg);
-      else if (msg.type === 'deleted') refresh();
+      else if (msg.type === 'deleted')      refresh();
     });
 
     function showError(msg) {
@@ -169,7 +228,7 @@ export class DbManagementPanel {
 
     function updateProgress(data) {
       const row = document.getElementById('progressRow');
-      const msg = document.getElementById('progressMsg');
+      const msgEl = document.getElementById('progressMsg');
       if (data.phase === 'done') {
         row.classList.remove('visible');
         refresh();
@@ -178,37 +237,110 @@ export class DbManagementPanel {
         showError(data.message || 'Download failed');
       } else {
         row.classList.add('visible');
-        msg.textContent = (data.phase || 'Downloading') + (data.pct ? ' ' + data.pct + '%' : '');
+        const projName = _projectNames[data.projectId] || ('Project ' + data.projectId);
+        const pct = data.pct ? ' \u2014 ' + data.pct + '%' : '';
+        msgEl.textContent = projName + ': ' + (data.phase || 'Downloading') + pct;
       }
     }
 
     function renderProjects(local, index) {
       const container = document.getElementById('projectRows');
+
+      // ── Build lookup maps ──────────────────────────────────────────────────
       const localMap = {};
       (local || []).forEach(p => { localMap[p.project_id] = p; });
-      const projects = index && index.projects ? Object.values(index.projects) : [];
 
-      if (projects.length === 0) {
-        container.innerHTML = '<p style="color:var(--vscode-descriptionForeground);padding:16px 0">No cache server configured or no projects found.</p>';
+      const serverProjs = (index && index.projects) ? Object.values(index.projects) : [];
+      const serverMap = {};
+      serverProjs.forEach(p => { serverMap[p.id] = p; });
+
+      // UNION of server + local project IDs — fixes "sync one → other disappears"
+      const allIds = [
+        ...new Set([
+          ...serverProjs.map(p => Number(p.id)),
+          ...Object.keys(localMap).map(Number),
+        ])
+      ].sort((a, b) => a - b);
+
+      if (allIds.length === 0) {
+        container.innerHTML =
+          '<p style="color:var(--vscode-descriptionForeground);padding:16px 0">' +
+          'No cache server configured and no local databases found.</p>';
         return;
       }
 
-      container.innerHTML = projects.map(p => {
-        const loc = localMap[p.id];
-        const localStatus = loc
-          ? '<span class="status-downloaded">\u2713 ' + (loc.variant || 'data_only') + ' (' + formatBytes(loc.size_bytes) + ')</span>'
-          : '<span class="status-none">Not downloaded</span>';
-        const variants = p.variants || {};
-        const variantInfo = Object.entries(variants).map(([k, v]) =>
-          k + ': ' + formatBytes(v.size_bytes)
-        ).join(', ') || '\u2014';
+      // Cache names for progress messages
+      _projectNames = {};
+      allIds.forEach(id => {
+        _projectNames[id] = serverMap[id]?.name || ('Project ' + id);
+      });
+
+      container.innerHTML = allIds.map(id => {
+        const svr      = serverMap[id];
+        const loc      = localMap[id];
+        const name     = svr?.name || ('Project ' + id);
+        const variants = svr?.variants || {};
+
+        // ── Local DB column ────────────────────────────────────────────────
+        let dataCell = '<span class="status-none">Not downloaded</span>';
+        let imgsCell = '';
+        if (loc) {
+          const itemLbl   = (loc.items_count || 0) + ' items';
+          const embImgLbl = loc.has_images ? ' \u00b7 ' + loc.image_count + ' imgs embedded' : '';
+          dataCell =
+            '<span class="status-ok">\u2713 Data: ' + fmtBytes(loc.db_size_bytes) + '</span>' +
+            '<div class="status-lbl">' + itemLbl + embImgLbl + '</div>';
+
+          if (loc.has_images_db) {
+            imgsCell =
+              '<div class="imgs-row"><span class="status-ok">' +
+              '\u2713 Images DB: ' + (loc.images_db_count || 0) + ' imgs</span></div>';
+          } else {
+            imgsCell =
+              '<div class="imgs-row"><span class="status-none">No images DB</span></div>';
+          }
+        }
+
+        // ── Server variants column ─────────────────────────────────────────
+        const variantLines = Object.entries(variants).map(([k, v]) => {
+          const lbl  = { data_only: 'Data', images: 'Images', with_images: '+All' }[k] || k;
+          const imgs = v.image_count ? ' (' + v.image_count + ' imgs)' : '';
+          return lbl + ': ' + fmtBytes(v.size_bytes) + imgs;
+        });
+        const variantCell = variantLines.length
+          ? '<div class="variant-info">' + variantLines.join('<br>') + '</div>'
+          : '<span class="status-none">Not on server</span>';
+
+        // ── Actions column ─────────────────────────────────────────────────
         const actions = [
-          '<vscode-button appearance="primary" onclick="download(' + p.id + ',\'data_only\')">\u2193 Data</vscode-button>',
-          (variants.with_images ? '<vscode-button appearance="secondary" onclick="download(' + p.id + ',\'with_images\')">\u2193 +Images</vscode-button>' : ''),
-          (loc ? '<vscode-button appearance="secondary" onclick="deleteDb(' + p.id + ')">Delete</vscode-button>' : ''),
+          '<vscode-button appearance="primary" onclick="download(' + id + ',\'data_only\')">&#11123; Data</vscode-button>',
+          (variants.images
+            ? '<vscode-button appearance="secondary" onclick="download(' + id + ',\'images\')">&#11123; Images</vscode-button>'
+            : ''),
+          (variants.with_images
+            ? '<vscode-button appearance="secondary" onclick="download(' + id + ',\'with_images\')">&#11123; +All</vscode-button>'
+            : ''),
+          (loc
+            ? '<vscode-button appearance="secondary" onclick="deleteDb(' + id + ')">Delete</vscode-button>'
+            : ''),
         ].filter(Boolean).join('');
 
-        return '<div class="row"><span><div class="project-name">' + p.name + '</div><div class="project-id">ID: ' + p.id + '</div></span><span>' + localStatus + '</span><span>' + formatDate(p.last_sync) + '</span><span style="font-size:11px;color:var(--vscode-descriptionForeground)">' + variantInfo + '</span><span class="actions">' + actions + '</span></div>';
+        const localBadge = !svr
+          ? '<span class="local-only-badge">local only</span>'
+          : '';
+
+        return (
+          '<div class="row">' +
+          '<span>' +
+            '<div class="project-name">' + name + localBadge + '</div>' +
+            '<div class="project-id">ID: ' + id + '</div>' +
+          '</span>' +
+          '<span>' + dataCell + imgsCell + '</span>' +
+          '<span style="font-size:12px">' + fmtDate(svr?.last_sync || loc?.last_sync) + '</span>' +
+          '<span>' + variantCell + '</span>' +
+          '<span class="actions">' + actions + '</span>' +
+          '</div>'
+        );
       }).join('');
     }
 
@@ -218,6 +350,9 @@ export class DbManagementPanel {
     }
     function deleteDb(projectId) {
       send({ type: 'delete', projectId });
+    }
+    function deleteImagesDb(projectId) {
+      send({ type: 'deleteImages', projectId });
     }
 
     refresh();
