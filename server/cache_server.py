@@ -546,7 +546,7 @@ def _generate_browser_script(
   const IMGS     = {images_json};
 
   // ── tuning knobs ──────────────────────────────────────────────────
-  const CONCUR     = 10;    // images fetched in parallel
+  const CONCUR     = 25;    // images fetched in parallel
   const BATCH_SZ   = 40;    // images per upload batch to this server
   const MAX_RETRY  = 4;     // retries on 429 / 5xx from Jama
   const RETRY_BASE = 3000;  // ms for first retry backoff (doubles each attempt)
