@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -65,6 +66,61 @@ def load_env(env_path: str) -> None:
         if key and key not in os.environ:
             os.environ[key] = val
     logger.info("Loaded env from %s", env_path)
+
+
+def _merge_browser_images(project_id: int, db_path: Path, out_dir: Path) -> int:
+    """Merge browser-uploaded images from the persistent sidecar into db_path.
+
+    The sidecar ({out_dir}/projects/{project_id}_browser_images.db) is written
+    by cache_server.py every time a browser image sync upload succeeds.  It
+    survives nightly regeneration because this script never writes to it.
+
+    Returns the number of images merged (0 if no sidecar exists).
+    """
+    sidecar = out_dir / "projects" / f"{project_id}_browser_images.db"
+    if not sidecar.exists():
+        return 0
+
+    src_conn = sqlite3.connect(str(sidecar))
+    dst_conn = sqlite3.connect(str(db_path))
+    count = 0
+    try:
+        # Ensure images table exists in the destination (it should, from schema DDL)
+        dst_conn.execute("""
+            CREATE TABLE IF NOT EXISTS images (
+                attachment_id INTEGER PRIMARY KEY,
+                file_name     TEXT    NOT NULL DEFAULT '',
+                mime_type     TEXT    NOT NULL DEFAULT 'image/png',
+                data          BLOB    NOT NULL,
+                size_bytes    INTEGER NOT NULL DEFAULT 0,
+                cached_at     REAL    NOT NULL DEFAULT 0
+            )
+        """)
+        try:
+            rows = src_conn.execute(
+                "SELECT attachment_id, file_name, mime_type, data, size_bytes, cached_at FROM images"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return 0  # sidecar has no images table yet
+
+        for row in rows:
+            dst_conn.execute(
+                """INSERT INTO images(attachment_id,file_name,mime_type,data,size_bytes,cached_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(attachment_id) DO UPDATE SET
+                     mime_type=excluded.mime_type, data=excluded.data,
+                     size_bytes=excluded.size_bytes, cached_at=excluded.cached_at""",
+                row,
+            )
+            count += 1
+        dst_conn.commit()
+    finally:
+        src_conn.close()
+        dst_conn.close()
+
+    if count:
+        logger.info("  Merged %d browser-uploaded image(s) from sidecar", count)
+    return count
 
 
 async def generate_project(
@@ -132,11 +188,19 @@ async def generate_project(
     finally:
         await proj_db2.close()
 
+    # Merge browser-uploaded images from persistent sidecar (survives nightly runs)
+    browser_count = _merge_browser_images(project_id, img_db_path, out_dir)
+
     # Export with_images variant
     with_images_path = projects_dir / f"{project_id}_with_images.db.gz"
     _compress_db(img_db_path, with_images_path)
     with_images_size = with_images_path.stat().st_size
-    logger.info("  with_images: %s (%.1f MB)", with_images_path.name, with_images_size / 1024 / 1024)
+    total_images = rest_count + browser_count
+    logger.info(
+        "  with_images: %s (%.1f MB) — %d REST + %d browser = %d total images",
+        with_images_path.name, with_images_size / 1024 / 1024,
+        rest_count, browser_count, total_images,
+    )
 
     # Cleanup temp files (rename-to-trash if Windows locks prevent deletion)
     _remove_db(db_path)
@@ -155,7 +219,9 @@ async def generate_project(
             "with_images": {
                 "file": f"projects/{project_id}_with_images.db.gz",
                 "size_bytes": with_images_size,
-                "image_count": rest_count,
+                "image_count": total_images,
+                "rest_image_count": rest_count,
+                "browser_image_count": browser_count,
             },
         },
     }

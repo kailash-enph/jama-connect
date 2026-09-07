@@ -358,6 +358,56 @@ _WEB_IMG_RE = re.compile(r'/attachment/(\d+)/([^"\'<>\s\\]+)')
 _upload_tokens: dict[str, datetime] = {}   # token -> expiry (30 min)
 UPLOAD_TOKEN_TTL = timedelta(minutes=30)
 
+_IMAGES_DDL = """
+    CREATE TABLE IF NOT EXISTS images (
+        attachment_id INTEGER PRIMARY KEY,
+        file_name     TEXT    NOT NULL DEFAULT '',
+        mime_type     TEXT    NOT NULL DEFAULT 'image/png',
+        data          BLOB    NOT NULL,
+        size_bytes    INTEGER NOT NULL DEFAULT 0,
+        cached_at     REAL    NOT NULL DEFAULT 0
+    )
+"""
+_IMAGES_UPSERT = """
+    INSERT INTO images(attachment_id,file_name,mime_type,data,size_bytes,cached_at)
+    VALUES(?,?,?,?,?,?)
+    ON CONFLICT(attachment_id) DO UPDATE SET
+        mime_type=excluded.mime_type, data=excluded.data,
+        size_bytes=excluded.size_bytes, cached_at=excluded.cached_at
+"""
+
+
+def _sidecar_path(project_id: int) -> Path:
+    """Persistent sidecar DB: survives nightly generator runs.
+
+    Lives alongside the .db.gz files so generate_caches.py can find it by
+    convention (same SERVE_DIR/projects/ directory).
+    """
+    return _DATA_DIR / "projects" / f"{project_id}_browser_images.db"
+
+
+def _save_to_sidecar(project_id: int, images: list[dict]) -> None:
+    """Upsert browser-uploaded images into the persistent sidecar DB.
+
+    The sidecar is never overwritten by generate_caches.py, so images
+    uploaded here survive across nightly regeneration runs.
+    """
+    sidecar = _sidecar_path(project_id)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(sidecar))
+    try:
+        conn.execute(_IMAGES_DDL)
+        for img in images:
+            raw = base64.b64decode(img["data_b64"])
+            conn.execute(
+                _IMAGES_UPSERT,
+                (int(img["att_id"]), img.get("fname", "image.png"),
+                 img.get("mime", "image/png"), raw, len(raw), time.time()),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def _scan_project_for_images(project_id: int) -> list[dict]:
     """Scan the project data_only DB for web-pasted attachment URLs.
@@ -395,11 +445,17 @@ def _scan_project_for_images(project_id: int) -> list[dict]:
 
 
 def _store_images_in_db(project_id: int, images: list[dict]) -> int:
-    """Insert browser-fetched image blobs into the _with_images.db.gz file.
+    """Insert browser-fetched image blobs into the persistent sidecar and
+    the live _with_images.db.gz file.
 
-    Falls back to data_only DB if _with_images does not exist yet.
-    Returns the number of images stored.
+    The sidecar (_browser_images.db) is written first so images are never
+    lost even if the gz rewrite fails.  Falls back to data_only DB if
+    _with_images.db.gz does not exist yet.  Returns the number of images stored.
     """
+    # 1. Persist durably — survives nightly generate_caches.py runs
+    _save_to_sidecar(project_id, images)
+
+    # 2. Also update the live .db.gz so clients see changes immediately
     with_gz = _DATA_DIR / "projects" / f"{project_id}_with_images.db.gz"
     data_gz = _DATA_DIR / "projects" / f"{project_id}.db.gz"
     src_gz = with_gz if with_gz.exists() else data_gz
@@ -414,30 +470,13 @@ def _store_images_in_db(project_id: int, images: list[dict]) -> int:
         conn = sqlite3.connect(str(tmp))
         count = 0
         try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS images (
-                    attachment_id INTEGER PRIMARY KEY,
-                    file_name     TEXT    NOT NULL DEFAULT '',
-                    mime_type     TEXT    NOT NULL DEFAULT 'image/png',
-                    data          BLOB    NOT NULL,
-                    size_bytes    INTEGER NOT NULL DEFAULT 0,
-                    cached_at     REAL    NOT NULL DEFAULT 0
-                )
-            """)
+            conn.execute(_IMAGES_DDL)
             for img in images:
                 raw = base64.b64decode(img["data_b64"])
                 conn.execute(
-                    """INSERT INTO images(attachment_id,file_name,mime_type,data,size_bytes,cached_at)
-                       VALUES(?,?,?,?,?,?)
-                       ON CONFLICT(attachment_id) DO UPDATE SET
-                         mime_type=excluded.mime_type, data=excluded.data,
-                         size_bytes=excluded.size_bytes, cached_at=excluded.cached_at""",
-                    (
-                        int(img["att_id"]),
-                        img.get("fname", "image.png"),
-                        img.get("mime", "image/png"),
-                        raw, len(raw), time.time(),
-                    ),
+                    _IMAGES_UPSERT,
+                    (int(img["att_id"]), img.get("fname", "image.png"),
+                     img.get("mime", "image/png"), raw, len(raw), time.time()),
                 )
                 count += 1
             conn.commit()
