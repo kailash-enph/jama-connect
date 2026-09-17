@@ -79,11 +79,9 @@ class ProjectDb:
         )
         is_fresh = len(rows) == 0
 
-        await self._db.executescript(SCHEMA_SQL)
-
         if is_fresh:
-            # SCHEMA_SQL already creates all tables at the current version —
-            # stamp version immediately so _migrate() skips the ALTER TABLE steps.
+            # New DB — create all tables and stamp version immediately.
+            await self._db.executescript(SCHEMA_SQL)
             await self._db.execute(
                 "INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
                 (str(SCHEMA_VERSION),),
@@ -91,6 +89,14 @@ class ProjectDb:
             await self._db.commit()
             logger.info("ProjectDb created fresh at v%d: %s", SCHEMA_VERSION, self._path.name)
         else:
+            # Existing DB — check version before running expensive executescript.
+            ver_rows = await self._db.execute_fetchall(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            )
+            current_ver = int(ver_rows[0][0]) if ver_rows else 0
+            if current_ver < SCHEMA_VERSION:
+                # Needs migration — run full DDL to ensure new tables exist first.
+                await self._db.executescript(SCHEMA_SQL)
             await self._migrate()
 
         logger.info("ProjectDb opened: %s (project %d)", self._path.name, self._project_id)

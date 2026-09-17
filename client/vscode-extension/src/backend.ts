@@ -74,10 +74,13 @@ export class BackendManager implements vscode.Disposable {
 
     // Build environment — credentials are stored in OS keyring via Settings API,
     // no need to inject them as env vars. The backend reads them from keyring on startup.
+    const cacheServerUrl = vscode.workspace.getConfiguration("jamaEditor").get<string>("cacheServerUrl", "").trim();
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       JAMA_URL: cfg.jamaUrl,
       JAMA_REST_PORT: String(port),
+      // Forward cache server URL so the backend knows where to download project DBs.
+      ...(cacheServerUrl ? { JAMA_CACHE_SERVER_URL: cacheServerUrl } : {}),
     };
 
     // Prefer pip-installed 'jama-rest' command, fall back to uv run
@@ -303,10 +306,13 @@ export class BackendManager implements vscode.Disposable {
         this.outputChannel.appendLine("[backend] Health check failed.");
         this._isRunning = false;
         this.updateStatus("error");
-        // Attempt auto-restart
+        // Attempt auto-restart — kill any lingering process first to avoid zombies.
         if (getConfig().autoStartBackend) {
           this.outputChannel.appendLine("[backend] Attempting auto-restart...");
-          this.process = null;
+          if (this.process) {
+            this.process.kill("SIGKILL");
+            this.process = null;
+          }
           await this.start();
         }
       }

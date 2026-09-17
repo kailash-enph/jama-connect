@@ -20,11 +20,10 @@ export function getConfig(): JamaEditorConfig {
   let backendPath = cfg.get<string>("backendPath", "");
 
   if (!backendPath) {
-    // Auto-detect: extension lives in enphase-windsurf-bundle/vscode-extensions/jama-editor
-    // Backend lives in enphase-windsurf-bundle/mcp-servers/jama-mcp-v2
-    const extDir = path.resolve(__dirname, "..");
-    const bundleRoot = path.resolve(extDir, "..", "..");
-    backendPath = path.join(bundleRoot, "mcp-servers", "jama-mcp-v2");
+    // Auto-detect: extension lives in tools/jama-connect/client/vscode-extension/out/
+    // Backend lives in tools/jama-connect/client/backend/
+    const extDir = path.resolve(__dirname, "..");  // vscode-extension/
+    backendPath = path.join(extDir, "..", "backend");
   }
 
   return {

@@ -40,6 +40,12 @@ export class DbManagementPanel {
 
     if (msg.type === "getStatus") {
       try {
+        // Ensure the backend has the cache server URL configured (survives restarts).
+        const cacheServerUrl = vscode.workspace.getConfiguration("jamaEditor").get<string>("cacheServerUrl", "").trim();
+        if (cacheServerUrl) {
+          await fetch(`${baseUrl}/api/cache-server/url?url=${encodeURIComponent(cacheServerUrl)}`, { method: "POST" }).catch(() => {});
+        }
+
         const [statusRes, indexRes] = await Promise.allSettled([
           fetch(`${baseUrl}/api/db/status`).then(r => r.json()),
           fetch(`${baseUrl}/api/cache-server/index`).then(r => r.json()),
