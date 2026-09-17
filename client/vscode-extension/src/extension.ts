@@ -475,7 +475,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Open Database Management panel
     vscode.commands.registerCommand("jamaEditor.manageProjectDbs", () => {
       DbManagementPanel.show(context.extensionUri);
-    })
+    }),
+
+    // Set active project by ID — called by SettingsPanel to keep the tree in sync
+    vscode.commands.registerCommand(
+      "jamaEditor.setActiveProjectById",
+      (projectId: number, projectName: string) => {
+        projectSelector?.setProjectById(
+          Number(projectId),
+          projectName || `Project ${projectId}`
+        );
+        testRunnerProvider?.refresh();
+      }
+    )
   );
 
   // Auto-start backend

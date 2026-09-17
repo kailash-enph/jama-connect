@@ -81,6 +81,14 @@ export class ProjectSelector {
     this._onDidChange.fire(this._selectedId);
   }
 
+  /** Programmatically set the active project (e.g. from Settings panel). */
+  setProjectById(id: number, name: string): void {
+    this._selectedId = id;
+    this._selectedName = name;
+    this.ctx.workspaceState.update(LAST_PROJECT_KEY, id);
+    this._onDidChange.fire(id);
+  }
+
   /** Refresh the project list from API. */
   async refreshProjects(): Promise<void> {
     try {

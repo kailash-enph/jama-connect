@@ -142,6 +142,12 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
 
       case "setProject": {
         await this._apiFetch(`${base}/settings/project/${msg.projectId}`, { method: "POST" });
+        // Also update the extension's project selector so both trees reload immediately
+        await vscode.commands.executeCommand(
+          "jamaEditor.setActiveProjectById",
+          Number(msg.projectId),
+          String(msg.projectName ?? "")
+        );
         this._postMessage({ type: "projectResult", success: true, text: `Project set to ${msg.projectName}` });
         await this._fetchAll();
         break;
@@ -159,6 +165,12 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
         await this._apiFetch(`${base}/settings/cache/clear`, { method: "POST" });
         this._postMessage({ type: "cacheResult", success: true, text: "Cache cleared" });
         await this._fetchAll();
+        break;
+
+      case "reloadTree":
+        await vscode.commands.executeCommand("jamaEditor.refreshTree");
+        await vscode.commands.executeCommand("jamaEditor.refreshTestRunner");
+        this._postMessage({ type: "projectResult", success: true, text: "Tree reloaded" });
         break;
 
       case "openViewer":
@@ -290,6 +302,7 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
         </vscode-dropdown>
         <div class="btn-row">
           <vscode-button onclick="setProject()">Set Active</vscode-button>
+          <vscode-button appearance="secondary" onclick="reloadTree()">Reload Tree</vscode-button>
         </div>
         <div id="projMsg" class="msg" style="display:none"></div>
         <vscode-divider></vscode-divider>
@@ -356,6 +369,10 @@ export class SettingsPanel implements vscode.WebviewViewProvider {
       const selectedOpt = sel.querySelector('vscode-option[value="' + val + '"]');
       const name = selectedOpt ? selectedOpt.textContent : ('Project ' + val);
       send({ type: 'setProject', projectId: Number(val), projectName: name });
+    }
+
+    function reloadTree() {
+      send({ type: 'reloadTree' });
     }
 
     function saveCacheServerUrl() {
