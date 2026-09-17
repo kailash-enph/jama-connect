@@ -1,5 +1,9 @@
 # AGENTS.md — Jama Connect Development Reference
 
+> **Architecture reference:** See `ARCHITECTURE.md` in this directory for a complete technical
+> description of both the client app and the LAN cache server — module maps, data flow diagrams,
+> and a prioritised list of technical debt with concrete fix proposals.
+
 ## Repository Structure
 
 ```
