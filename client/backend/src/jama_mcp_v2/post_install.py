@@ -292,6 +292,106 @@ def create_symlink(check_only: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Step 2a-pre: Patch already-installed extension JS files
+#
+# When only extension.js changed (no package.json / package-level changes),
+# we can skip the slow full vsix re-extraction and just overwrite the out/
+# directory contents.  This is safe because the compiled output files are
+# deterministic — the same esbuild run always produces the same file set.
+# ---------------------------------------------------------------------------
+
+def get_bundled_extension_out() -> Path:
+    """Return the bundled extension out/ directory inside the pip package."""
+    return get_package_dir() / "data" / "extension_out"
+
+
+def _find_installed_extension_dirs() -> list[Path]:
+    """Return all directories where enphase.jama-editor-* is installed.
+
+    Scans the four known host locations:
+      ~/.devin/extensions/           — Devin Desktop
+      ~/.vscode/extensions/          — VS Code / Windsurf
+      %APPDATA%/Devin/               — Devin AppData (future-proofing)
+    """
+    home = Path(os.environ.get("USERPROFILE", "~")) if sys.platform == "win32" else Path.home()
+    appdata = Path(os.environ.get("APPDATA", "")) if sys.platform == "win32" else Path.home()
+
+    search_roots = [
+        home / ".devin" / "extensions",
+        home / ".vscode" / "extensions",
+        appdata / "Devin" / "extensions",
+    ]
+
+    found: list[Path] = []
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for d in root.iterdir():
+            if d.is_dir() and d.name.startswith("enphase.jama-editor"):
+                found.append(d)
+    return found
+
+
+def patch_extension_out(check_only: bool = False) -> bool:
+    """Overwrite the out/ directory of every installed enphase.jama-editor extension
+    with the JS files bundled inside this pip package.
+
+    Much faster than re-extracting the full vsix — no package.json or node_modules
+    are touched, only the compiled JS bundle files.
+
+    Returns True if all found installations were patched successfully (or check was OK).
+    """
+    src_out = get_bundled_extension_out()
+    if not src_out.exists():
+        print(f"  WARNING: Bundled extension_out not found at {src_out} — skipping patch")
+        return False
+
+    installs = _find_installed_extension_dirs()
+    if not installs:
+        print("  No installed enphase.jama-editor extensions found — skipping patch")
+        return True
+
+    all_ok = True
+    for install_dir in installs:
+        dst_out = install_dir / "out"
+        if check_only:
+            if not dst_out.exists():
+                print(f"  [MISSING out/] {install_dir.name}")
+                all_ok = False
+                continue
+            # Compare extension.js sizes as a proxy for staleness
+            src_js = src_out / "extension.js"
+            dst_js = dst_out / "extension.js"
+            if not dst_js.exists():
+                print(f"  [OUTDATED] {install_dir.name} — no extension.js")
+                all_ok = False
+            elif src_js.stat().st_size != dst_js.stat().st_size:
+                print(f"  [OUTDATED] {install_dir.name} — extension.js size mismatch "
+                      f"(installed={dst_js.stat().st_size}, bundled={src_js.stat().st_size})")
+                all_ok = False
+            else:
+                print(f"  [OK] {install_dir.name}")
+            continue
+
+        try:
+            dst_out.mkdir(parents=True, exist_ok=True)
+            # Copy all files from bundled out/ recursively
+            for src_file in src_out.rglob("*"):
+                if src_file.is_dir():
+                    continue
+                relative = src_file.relative_to(src_out)
+                dst_file = dst_out / relative
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src_file), str(dst_file))
+            print(f"  Patched: {install_dir.name}")
+        except Exception as e:
+            print(f"  WARNING: Could not patch {install_dir.name}: {e}")
+            all_ok = False
+
+    return all_ok
+
+
+# ---------------------------------------------------------------------------
 # Step 2a: Devin extension install (direct zip extraction)
 #
 # Devin is a VS Code fork with dataFolderName=".devin", so user extensions
@@ -513,18 +613,22 @@ def run_setup(
         print("\nRepair-only mode — done.")
         return
 
-    print("\n[1/3] Devin MCP symlink")
+    print("\n[1/4] Devin MCP symlink")
     create_symlink(check_only=check_only)
 
     if not skip_extension:
-        print("\n[2/3] Devin extension (direct extraction -> ~/.devin/extensions/)")
+        print("\n[2/4] Patch extension JS (out/ hot-update -> all installed hosts)")
+        patch_extension_out(check_only=check_only)
+
+        print("\n[3/4] Devin extension (full vsix extraction -> ~/.devin/extensions/)")
         install_devin_extension(check_only=check_only)
 
-        print("\n[3/3] VS Code extension (code --install-extension)")
+        print("\n[4/4] VS Code extension (code --install-extension)")
         install_vscode_extension(check_only=check_only)
     else:
-        print("\n[2/3] Devin extension — skipped (--skip-extension)")
-        print("\n[3/3] VS Code extension — skipped (--skip-extension)")
+        print("\n[2/4] Extension patch — skipped (--skip-extension)")
+        print("\n[3/4] Devin extension — skipped (--skip-extension)")
+        print("\n[4/4] VS Code extension — skipped (--skip-extension)")
 
     if not check_only:
         print("\nDone. Reload VS Code / Devin to activate the extension.")
