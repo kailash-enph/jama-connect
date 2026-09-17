@@ -1,12 +1,11 @@
 /**
- * Tests for the rewriteImageUrls function.
+ * Tests for the rewriteImageUrls utility.
  *
- * Run with:  npx tsx src/__tests__/imageRewrite.test.ts
- *
- * Pure logic tests — no VS Code API or Vitest required.
+ * Pure logic — no VS Code API required.
+ * Runs under vitest (npm test) or standalone: npx tsx src/__tests__/imageRewrite.test.ts
  */
 
-import assert from "node:assert";
+import { describe, it, expect } from "vitest";
 
 // Unified backend: editor routes are mounted at /editor/ on the main port (8765).
 const BACKEND_PORT = 8765;
@@ -17,80 +16,45 @@ function rewriteImageUrls(html: string): string {
   return html.replace(JAMA_IMG_RE, `${EDITOR_BASE}/api/proxy/image/$1`);
 }
 
-// ---------- Tests ----------
+describe("rewriteImageUrls", () => {
+  it("rewrites a Jama attachment URL to the local proxy", () => {
+    const html = '<img src="https://enphase.jamacloud.com/rest/v1/attachments/12345/file">';
+    const result = rewriteImageUrls(html);
+    expect(result).toContain(`${EDITOR_BASE}/api/proxy/image/12345`);
+    expect(result).not.toContain("jamacloud.com");
+  });
 
-function testRewritesJamaUrl() {
-  const html = '<img src="https://enphase.jamacloud.com/rest/v1/attachments/12345/file">';
-  const result = rewriteImageUrls(html);
-  assert.ok(result.includes(`${EDITOR_BASE}/api/proxy/image/12345`), "Should rewrite to proxy URL");
-  assert.ok(!result.includes("jamacloud.com"), "Should remove Jama domain");
-}
+  it("passes through HTML that has no Jama image URLs", () => {
+    const html = "<p>Hello world</p>";
+    expect(rewriteImageUrls(html)).toBe(html);
+  });
 
-function testNoImagesPassthrough() {
-  const html = "<p>Hello world</p>";
-  const result = rewriteImageUrls(html);
-  assert.strictEqual(result, html, "HTML without images should pass through unchanged");
-}
+  it("rewrites multiple images in one pass", () => {
+    const html =
+      '<img src="https://enphase.jamacloud.com/rest/v1/attachments/111/file">' +
+      '<img src="https://enphase.jamacloud.com/rest/v1/attachments/222/file">';
+    const result = rewriteImageUrls(html);
+    expect(result).toContain(`${EDITOR_BASE}/api/proxy/image/111`);
+    expect(result).toContain(`${EDITOR_BASE}/api/proxy/image/222`);
+    expect(result).not.toContain("jamacloud.com");
+  });
 
-function testMultipleImages() {
-  const html =
-    '<img src="https://enphase.jamacloud.com/rest/v1/attachments/111/file">' +
-    '<img src="https://enphase.jamacloud.com/rest/v1/attachments/222/file">';
-  const result = rewriteImageUrls(html);
-  assert.ok(result.includes(`${EDITOR_BASE}/api/proxy/image/111`), "First image rewritten");
-  assert.ok(result.includes(`${EDITOR_BASE}/api/proxy/image/222`), "Second image rewritten");
-  assert.ok(!result.includes("jamacloud.com"), "No Jama URLs remain");
-}
+  it("handles empty string", () => {
+    expect(rewriteImageUrls("")).toBe("");
+  });
 
-function testEmptyHtml() {
-  assert.strictEqual(rewriteImageUrls(""), "", "Empty string should return empty");
-}
+  it("preserves non-Jama image URLs", () => {
+    const html = '<img src="https://example.com/image.png">';
+    expect(rewriteImageUrls(html)).toBe(html);
+  });
 
-function testPreservesNonJamaUrls() {
-  const html = '<img src="https://example.com/image.png">';
-  const result = rewriteImageUrls(html);
-  assert.strictEqual(result, html, "Non-Jama URLs should be preserved");
-}
+  it("rewrites http:// Jama URLs as well as https://", () => {
+    const html = '<img src="http://test.jamacloud.com/rest/v1/attachments/333/file">';
+    expect(rewriteImageUrls(html)).toContain(`${EDITOR_BASE}/api/proxy/image/333`);
+  });
 
-function testHttpAndHttps() {
-  const html = '<img src="http://test.jamacloud.com/rest/v1/attachments/333/file">';
-  const result = rewriteImageUrls(html);
-  assert.ok(result.includes(`${EDITOR_BASE}/api/proxy/image/333`), "HTTP URLs should also be rewritten");
-}
-
-function testCspIncludesProxy() {
-  // Verify the CSP string pattern includes the editor base URL
-  const csp = `img-src \${webview.cspSource} https: data: ${EDITOR_BASE};`;
-  assert.ok(csp.includes(EDITOR_BASE), "CSP should include editor backend origin");
-}
-
-// ---------- Runner ----------
-
-const tests = [
-  testRewritesJamaUrl,
-  testNoImagesPassthrough,
-  testMultipleImages,
-  testEmptyHtml,
-  testPreservesNonJamaUrls,
-  testHttpAndHttps,
-  testCspIncludesProxy,
-];
-
-let passed = 0;
-let failed = 0;
-
-for (const test of tests) {
-  try {
-    test();
-    console.log(`  ✓ ${test.name}`);
-    passed++;
-  } catch (err) {
-    console.error(`  ✗ ${test.name}: ${err}`);
-    failed++;
-  }
-}
-
-console.log(`\n${passed} passed, ${failed} failed out of ${tests.length} tests`);
-if (failed > 0) {
-  process.exit(1);
-}
+  it("CSP template includes the editor base URL", () => {
+    const csp = `img-src \${webview.cspSource} https: data: ${EDITOR_BASE};`;
+    expect(csp).toContain(EDITOR_BASE);
+  });
+});

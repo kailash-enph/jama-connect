@@ -159,6 +159,8 @@ server/data/
 3. **Legacy cache.db** — existing single-file cache, read-only fallback
 
 ## Testing
+
+### Python Backend (`client/backend/`)
 ```powershell
 cd client/backend
 
@@ -175,7 +177,7 @@ uv run pytest tests/ -v --ignore=tests/test_cache_schema.py
 uv run pytest tests/test_mcp_tools.py -v
 ```
 
-### Test Suite Summary (117 tests)
+#### Python Test Suite Summary (117 tests)
 | File | Tests | Coverage |
 |------|-------|---------|
 | `test_cache_schema.py` | 9 (1 live) | Schema init, FTS, imports, live DB round-trip |
@@ -187,6 +189,46 @@ uv run pytest tests/test_mcp_tools.py -v
 | `test_mcp_refresh_endpoints.py` | 5 | Refresh item/plan/cycle/run endpoints |
 | `test_mcp_tools.py` | 44 | All MCP tools (mocked Jama API) |
 
-### Fixture Notes
+#### Fixture Notes
 - `mock_services` patches `jama_mcp_v2.services.services` (the `ServiceRegistry` singleton), **not** `jama_editor.editor_server` module globals (those were removed in the Phase 0 refactor).
 - `isolate_image_cache` (in `TestProxyImageEndpoint`) patches `jama_editor.editor_server._SVC_CACHE_DIR` to a fresh `tmp_path` per test, preventing stale-file pollution across tests.
+
+---
+
+### VS Code Extension (`client/vscode-extension/`)
+
+Uses **vitest** with a vscode module mock — runs in Node, no Extension Host required.
+
+```powershell
+cd client/vscode-extension
+npm test              # vitest run (all tests, single pass)
+npm run test:watch    # vitest watch mode (during development)
+npm run test:coverage # generate coverage report
+```
+
+**RULE: run `npm test` before every build/deploy of the extension. Fix any failures before proceeding.**
+
+#### Extension Test Suite Summary (23 tests)
+| File | Tests | What it covers | Bugs caught |
+|------|-------|---------------|------------|
+| `src/__tests__/imageRewrite.test.ts` | 7 | Image URL rewriting to local proxy | — |
+| `src/__tests__/projectTree.test.ts` | 16 | `ProjectSelector` + `ProjectTreeProvider` | All 4 bugs below |
+
+#### Regression Tests — Past Production Bugs
+| Bug | Test(s) | PR/commit |
+|-----|---------|-----------|
+| `treeCache=[]` caused infinite re-fetch when API returned empty | "calls getItemTree exactly once even when API returns []" | be21676 |
+| Project switch didn't reload tree (wrong cache guard) | "re-fetches after project switch (cache reset to null)" | be21676 |
+| Silent blank tree when project has no local DB | "shows hint item (not blank) when project has no cached data" | be21676 |
+| `setProjectById` not available — SettingsPanel couldn't update selector | "setProjectById(): updates selectedId, persists, fires onDidChange" | c2ccee8 |
+
+#### Extension Test Architecture
+- **vscode mock**: `src/__tests__/mocks/vscode.ts` — stubs `EventEmitter`, `TreeItem`, `ThemeIcon`, `window`, `commands`, `workspace`
+- **vitest config**: `vitest.config.ts` — `alias: { vscode: "...mocks/vscode.ts" }` redirects all `import "vscode"` to the stub
+- **No Extension Host needed** — all tree provider logic is pure TypeScript, fully testable in Node
+
+#### When to Add Tests
+Add a new test in `src/__tests__/projectTree.test.ts` (or a new file) whenever you:
+- Add a new command or button that changes extension state
+- Add logic to a tree provider (`getChildren`, `getTreeItem`, cache behaviour)
+- Fix a bug — write the regression test **first**, confirm it fails, then fix the code
