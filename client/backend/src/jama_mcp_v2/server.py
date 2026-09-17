@@ -1619,7 +1619,16 @@ async def api_project(project_id: int):
 @rest_app.get("/api/projects/{project_id}/items")
 async def api_items(project_id: int):
     _need(cache, "cache")
-    return await cache.get_items_by_project(project_id)
+    items = await cache.get_items_by_project(project_id)
+    # P1 read-path: fall back to per-project DB if JamaCache is empty
+    if not items and services.cache_manager:
+        try:
+            if await services.cache_manager.has_project_db(project_id):
+                pdb = await services.cache_manager.get_project_db(project_id)
+                items = await pdb.get_items_by_project(project_id)
+        except Exception as exc:
+            logger.warning("ProjectDb items fallback failed for project %d: %s", project_id, exc)
+    return items
 
 
 @rest_app.get("/api/items/resolve")
@@ -1708,8 +1717,35 @@ async def api_item_ancestors(item_id: int, project_id: int = Query(...)):
 
 @rest_app.get("/api/projects/{project_id}/tree")
 async def api_tree(project_id: int, root_id: int | None = None):
+    """Return the item tree for a project.
+
+    Read-path priority (P1 read-path fix):
+      1. JamaCache (cache.db) — populated by MCP sync tools
+      2. ProjectDb (projects/{id}.db) — downloaded from LAN cache server
+         or populated by the dual-write sync path
+
+    If JamaCache has no items for the project, the per-project DB is checked
+    automatically so that LAN-downloaded databases are immediately visible
+    without requiring a full MCP sync.
+    """
     _need(cache, "cache")
     items = await cache.get_items_by_project(project_id)
+
+    # P1 read-path: fall back to per-project DB if JamaCache is empty
+    if not items and services.cache_manager:
+        try:
+            if await services.cache_manager.has_project_db(project_id):
+                pdb = await services.cache_manager.get_project_db(project_id)
+                items = await pdb.get_items_by_project(project_id)
+                if items:
+                    logger.debug(
+                        "Tree for project %d: served %d items from ProjectDb "
+                        "(JamaCache empty — using LAN-downloaded DB)",
+                        project_id, len(items),
+                    )
+        except Exception as exc:
+            logger.warning("ProjectDb tree fallback failed for project %d: %s", project_id, exc)
+
     type_map = await _get_item_type_map()
     tree = build_tree(items, root_id, item_type_map=type_map)
     return [n.model_dump() for n in tree]
