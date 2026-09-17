@@ -2,7 +2,7 @@
   "name": "jama-editor",
   "displayName": "Jama Editor",
   "description": "Edit Jama Connect items directly in VS Code with rich-text editing, workflow transitions, and full traceability.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "enphase",
   "icon": "media/jama-icon.png",
   "repository": {

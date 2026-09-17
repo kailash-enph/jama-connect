@@ -66,8 +66,7 @@ progress_bus = ProgressBus()
 
 
 def _rebind_module_aliases() -> None:
-    """After services.init_mcp_services(), copy refs into module globals
-    so that existing `assert cache`, `assert api_client` patterns still work."""
+    """After services.init_mcp_services(), copy refs into module globals."""
     global api_client, cache, sync_engine, test_manager, writer, exporter
     global search_engine, attachment_mgr, progress_bus
     api_client = services.api_client  # type: ignore[assignment]
@@ -79,6 +78,52 @@ def _rebind_module_aliases() -> None:
     search_engine = services.search_engine
     attachment_mgr = services.attachment_mgr
     progress_bus = services.progress_bus  # type: ignore[assignment]
+
+
+_NOT_INIT_MSG = (
+    "Jama service '{name}' is not initialized. "
+    "Ensure credentials are configured in Settings and the backend started successfully."
+)
+
+# ---------- Item-type name cache (populated lazily on first tree request) ----------
+# Maps integer item_type ID → display name, e.g. {81: "Requirement", 82: "Test Case"}.
+# Shared across all requests; refreshed when empty (restart or explicit cache clear).
+_item_type_display_map: dict[int, str] = {}
+
+
+async def _get_item_type_map() -> dict[int, str]:
+    """Return item_type_id → display name mapping, fetching from Jama API if empty."""
+    global _item_type_display_map
+    if _item_type_display_map or not api_client:
+        return _item_type_display_map
+    try:
+        types = await api_client.get_item_types()
+        _item_type_display_map = {
+            t.get("id", 0): t.get("display", "") or t.get("typeKey", "")
+            for t in types
+            if t.get("id")
+        }
+        logger.info("Item type cache populated: %d types", len(_item_type_display_map))
+    except Exception as exc:
+        logger.warning("Could not fetch item types for display names: %s", exc)
+    return _item_type_display_map
+
+
+def _need(obj: Any, name: str) -> Any:
+    """Return *obj* if not None; raise RuntimeError with a clear message otherwise.
+
+    Use instead of bare ``assert obj`` so that uninitialized-service failures
+    produce actionable error messages in MCP tool results and REST 503 responses,
+    not opaque AssertionError tracebacks.
+
+    Example::
+
+        c = _need(cache, "cache")
+        a = _need(api_client, "api_client")
+    """
+    if obj is None:
+        raise RuntimeError(_NOT_INIT_MSG.format(name=name))
+    return obj
 
 
 async def _init_services() -> None:
@@ -122,7 +167,7 @@ mcp = FastMCP("Jama Connect v2", lifespan=mcp_lifespan)
 @mcp.tool()
 async def jama_list_projects(ctx: Context) -> list[dict]:
     """List all Jama projects (from cache if available, otherwise from API)."""
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_projects()
     if cached:
         return cached
@@ -135,7 +180,7 @@ async def jama_list_projects(ctx: Context) -> list[dict]:
 @mcp.tool()
 async def jama_get_project(ctx: Context, project_id: int) -> dict:
     """Get details for a single Jama project."""
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     data = await api_client.get_project(project_id)
     await cache.upsert_project(data)
     return data
@@ -146,7 +191,7 @@ async def jama_get_project(ctx: Context, project_id: int) -> dict:
 @mcp.tool()
 async def jama_get_item(ctx: Context, item_id: int) -> dict:
     """Get a single Jama item by ID."""
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_item(item_id)
     if cached:
         return cached
@@ -158,11 +203,11 @@ async def jama_get_item(ctx: Context, item_id: int) -> dict:
 @mcp.tool()
 async def jama_get_item_children(ctx: Context, item_id: int) -> list[dict]:
     """Get child items of a Jama item."""
-    assert cache
+    _need(cache, "cache")
     cached = await cache.get_item_children(item_id)
     if cached:
         return cached
-    assert api_client
+    _need(api_client, "api_client")
     children = await api_client.get_item_children(item_id)
     for c in children:
         await cache.upsert_item(c)
@@ -172,7 +217,7 @@ async def jama_get_item_children(ctx: Context, item_id: int) -> list[dict]:
 @mcp.tool()
 async def jama_get_item_tree(ctx: Context, project_id: int, root_id: int | None = None) -> list[dict]:
     """Get the item tree for a project (or subtree from root_id)."""
-    assert cache
+    _need(cache, "cache")
     items = await cache.get_items_by_project(project_id)
     tree = build_tree(items, root_id)
     return [n.model_dump() for n in tree]
@@ -183,21 +228,21 @@ async def jama_get_item_tree(ctx: Context, project_id: int, root_id: int | None 
 @mcp.tool()
 async def jama_get_relationships(ctx: Context, project_id: int) -> list[dict]:
     """Get all relationships for a project."""
-    assert cache
+    _need(cache, "cache")
     return await cache.get_relationships(project_id)
 
 
 @mcp.tool()
 async def jama_get_item_upstream(ctx: Context, item_id: int) -> list[dict]:
     """Get upstream related items."""
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_upstream_related(item_id)
 
 
 @mcp.tool()
 async def jama_get_item_downstream(ctx: Context, item_id: int) -> list[dict]:
     """Get downstream related items."""
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_downstream_related(item_id)
 
 
@@ -206,7 +251,7 @@ async def jama_get_item_downstream(ctx: Context, item_id: int) -> list[dict]:
 @mcp.tool()
 async def jama_get_item_versions(ctx: Context, item_id: int) -> list[dict]:
     """Get version history for an item (on-demand, cached permanently)."""
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_item_version_list(item_id)
     if cached:
         return cached
@@ -232,7 +277,7 @@ async def jama_get_item_versions(ctx: Context, item_id: int) -> list[dict]:
 @mcp.tool()
 async def jama_get_item_at_version(ctx: Context, item_id: int, version: int) -> dict:
     """Get an item snapshot at a specific version number."""
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_item_version(item_id, version)
     if cached:
         return cached
@@ -258,7 +303,7 @@ async def jama_get_item_at_version(ctx: Context, item_id: int, version: int) -> 
 @mcp.tool()
 async def jama_sync_project(ctx: Context, project_id: int) -> dict:
     """Full sync of a Jama project to local cache."""
-    assert sync_engine
+    _need(sync_engine, "sync_engine")
     result = await sync_engine.sync_project(project_id, on_progress=progress_bus.make_callback())
     return result.model_dump(mode="json")
 
@@ -266,7 +311,7 @@ async def jama_sync_project(ctx: Context, project_id: int) -> dict:
 @mcp.tool()
 async def jama_incremental_sync(ctx: Context, project_id: int) -> dict:
     """Incremental sync (only changed items since last sync)."""
-    assert sync_engine
+    _need(sync_engine, "sync_engine")
     result = await sync_engine.incremental_sync(project_id, on_progress=progress_bus.make_callback())
     return result.model_dump(mode="json")
 
@@ -285,7 +330,7 @@ async def jama_search(ctx: Context, query: str, project_id: int | None = None, l
     Use jama_deep_search for holistic results with upstream/downstream
     relationship context, parent info, and parsed custom fields.
     """
-    assert search_engine
+    _need(search_engine, "search_engine")
     # Use unified search to also find test runs, plans, cycles
     results = await search_engine.unified_search(query, project_id=project_id, limit=limit)
     return [r.model_dump(mode="json") for r in results]
@@ -324,7 +369,7 @@ async def jama_deep_search(
         include_relations: Include upstream/downstream relationships (default True).
         max_relation_depth: 1 = direct relations only, 2 = include relations-of-relations.
     """
-    assert search_engine
+    _need(search_engine, "search_engine")
 
     # Use unified deep search (covers items + test runs + plans + cycles)
     unified_results = await search_engine.unified_deep_search(
@@ -367,28 +412,28 @@ async def jama_deep_search(
 @mcp.tool()
 async def jama_list_test_plans(ctx: Context, project_id: int) -> list[dict]:
     """List test plans for a project."""
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_plans(project_id)
 
 
 @mcp.tool()
 async def jama_list_test_cycles(ctx: Context, plan_id: int) -> list[dict]:
     """List test cycles for a test plan."""
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_cycles(plan_id)
 
 
 @mcp.tool()
 async def jama_list_test_runs(ctx: Context, cycle_id: int) -> list[dict]:
     """List test runs for a test cycle."""
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_runs(cycle_id)
 
 
 @mcp.tool()
 async def jama_get_test_summary(ctx: Context, cycle_id: int) -> dict:
     """Get pass/fail summary for a test cycle."""
-    assert test_manager
+    _need(test_manager, "test_manager")
     summary = await test_manager.get_test_summary(cycle_id)
     return summary.model_dump()
 
@@ -396,7 +441,7 @@ async def jama_get_test_summary(ctx: Context, cycle_id: int) -> dict:
 @mcp.tool()
 async def jama_update_test_run(ctx: Context, run_id: int, status: str, actual_results: str | None = None) -> dict:
     """Update a test run's status (PASSED, FAILED, BLOCKED, NOT_RUN, INPROGRESS)."""
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.update_test_run_status(run_id, status, actual_results)
 
 
@@ -409,7 +454,7 @@ async def jama_create_test_cycle(
     end_date: str,
 ) -> dict:
     """Create a new test cycle for a test plan."""
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.create_test_cycle(plan_id, name, start_date, end_date)
 
 
@@ -418,7 +463,7 @@ async def jama_create_test_cycle(
 @mcp.tool()
 async def jama_update_item(ctx: Context, item_id: int, fields: dict) -> dict:
     """Update fields on a Jama item (write-back)."""
-    assert writer
+    _need(writer, "writer")
     return await writer.update_item_fields(item_id, fields)
 
 
@@ -438,7 +483,7 @@ async def jama_create_item(
         parent_id: Parent item ID to nest under.
         fields: Dict of field values (e.g. {"name": "My Item", "description": "<p>HTML</p>"}).
     """
-    assert writer
+    _need(writer, "writer")
     return await writer.create_item(project_id, item_type_id, parent_id, fields)
 
 
@@ -449,7 +494,7 @@ async def jama_delete_item(ctx: Context, item_id: int) -> str:
     Args:
         item_id: Jama item ID to delete. This is permanent and cannot be undone.
     """
-    assert writer
+    _need(writer, "writer")
     await writer.delete_item(item_id)
     return f"Item {item_id} deleted successfully."
 
@@ -462,7 +507,7 @@ async def jama_add_comment(ctx: Context, item_id: int, comment_text: str) -> dic
         item_id: Jama item ID to comment on.
         comment_text: Plain text or HTML comment body.
     """
-    assert writer
+    _need(writer, "writer")
     return await writer.add_comment(item_id, comment_text)
 
 
@@ -480,7 +525,7 @@ async def jama_upload_attachment(
         file_path: Absolute path to the file to upload (e.g. PDF, image, spreadsheet).
         description: Optional description for the attachment.
     """
-    assert writer
+    _need(writer, "writer")
     return await writer.upload_attachment(item_id, file_path, description)
 
 
@@ -499,7 +544,7 @@ async def jama_create_relationship(
         relationship_type_id: Optional relationship type ID. Use jama_get_relationship_types
                               to list available types. If None, uses the project default.
     """
-    assert writer
+    _need(writer, "writer")
     return await writer.create_relationship(from_item, to_item, relationship_type_id)
 
 
@@ -510,7 +555,7 @@ async def jama_delete_relationship(ctx: Context, relationship_id: int) -> str:
     Args:
         relationship_id: Jama relationship ID to delete.
     """
-    assert writer
+    _need(writer, "writer")
     await writer.delete_relationship(relationship_id)
     return f"Relationship {relationship_id} deleted successfully."
 
@@ -518,7 +563,7 @@ async def jama_delete_relationship(ctx: Context, relationship_id: int) -> str:
 @mcp.tool()
 async def jama_get_relationship_types(ctx: Context) -> list[dict]:
     """Get all relationship types available in the Jama workspace."""
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_relationship_types()
 
 
@@ -527,7 +572,7 @@ async def jama_get_relationship_types(ctx: Context) -> list[dict]:
 @mcp.tool()
 async def jama_export_item(ctx: Context, item_id: int, format: str = "md") -> str:
     """Export a cached item as Markdown, HTML, or JSON."""
-    assert exporter
+    _need(exporter, "exporter")
     fmt = ExportFormat(format)
     return await exporter.export_item(item_id, fmt)
 
@@ -537,7 +582,7 @@ async def jama_export_item(ctx: Context, item_id: int, format: str = "md") -> st
 @mcp.tool()
 async def jama_cache_stats(ctx: Context) -> dict:
     """Get cache statistics (item counts, DB size)."""
-    assert cache
+    _need(cache, "cache")
     return await cache.get_stats()
 
 
@@ -557,7 +602,7 @@ async def jama_get_item_comments(ctx: Context, item_id: int) -> list[dict]:
         List of comment objects with id, body.text, createdDate, createdBy fields.
         Comments are returned in chronological order.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_comments(item_id)
 
 
@@ -574,7 +619,7 @@ async def jama_get_item_activities(ctx: Context, item_id: int) -> list[dict]:
     Returns:
         List of activity objects with id, date, action, user, and details of each change.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_activities(item_id)
 
 
@@ -594,7 +639,7 @@ async def jama_get_item_attachments(ctx: Context, item_id: int) -> list[dict]:
     Returns:
         List of attachment metadata objects with id, fileName, fileSize, mimeType.
     """
-    assert attachment_mgr
+    _need(attachment_mgr, "attachment_mgr")
     return await attachment_mgr.sync_item_attachments(item_id)
 
 
@@ -611,7 +656,7 @@ async def jama_download_attachment(ctx: Context, attachment_id: int) -> dict:
     Returns:
         Dict with 'data' (base64-encoded content), 'mime_type', and 'size' fields.
     """
-    assert attachment_mgr
+    _need(attachment_mgr, "attachment_mgr")
     return await attachment_mgr.get_attachment_as_base64(attachment_id)
 
 
@@ -631,7 +676,7 @@ async def jama_get_workflow_transitions(ctx: Context, item_id: int) -> list[dict
     Returns:
         List of transition objects with id, name, and targetStatus fields.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_workflow_transition_options(item_id)
 
 
@@ -655,7 +700,7 @@ async def jama_execute_workflow_transition(
     Returns:
         Updated item data after the transition.
     """
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     result = await api_client.execute_workflow_transition(item_id, transition_id, comment)
     try:
         fresh = await api_client.get_item(item_id)
@@ -680,7 +725,7 @@ async def jama_get_baselines(ctx: Context, project_id: int) -> list[dict]:
     Returns:
         List of baseline objects with id, name, description, createdDate.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_baselines(project_id)
 
 
@@ -694,7 +739,7 @@ async def jama_get_baseline(ctx: Context, baseline_id: int) -> dict:
     Returns:
         Baseline object with id, name, description, project, createdDate, createdBy.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_baseline(baseline_id)
 
 
@@ -711,7 +756,7 @@ async def jama_get_baseline_items(ctx: Context, baseline_id: int) -> list[dict]:
     Returns:
         List of versioned item objects frozen at the baseline point in time.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_baseline_versioned_items(baseline_id)
 
 
@@ -737,7 +782,7 @@ async def jama_export_tree(
     Returns:
         String content in the requested format.
     """
-    assert exporter
+    _need(exporter, "exporter")
     fmt = ExportFormat(format)
     return await exporter.export_tree(project_id, root_id, fmt)
 
@@ -758,7 +803,7 @@ async def jama_get_test_plan_summary(ctx: Context, plan_id: int) -> dict:
         Dict with total, passed, failed, blocked, not_run, in_progress counts
         and per-cycle breakdown.
     """
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.get_plan_summary(plan_id)
 
 
@@ -775,7 +820,7 @@ async def jama_list_test_groups(ctx: Context, plan_id: int) -> list[dict]:
     Returns:
         List of test group objects with id, name, and ordering info.
     """
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_groups(plan_id)
 
 
@@ -789,7 +834,7 @@ async def jama_get_test_group_cases(ctx: Context, group_id: int) -> list[dict]:
     Returns:
         List of test case objects within the group.
     """
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.get_test_group_cases(group_id)
 
 
@@ -808,7 +853,7 @@ async def jama_get_filters(ctx: Context, project_id: int) -> list[dict]:
     Returns:
         List of filter objects with id, name, and author.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_filters(project_id)
 
 
@@ -825,7 +870,7 @@ async def jama_run_filter(ctx: Context, filter_id: int, project_id: int) -> list
     Returns:
         List of item objects matching the filter criteria.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_filter_results(filter_id, project_id)
 
 
@@ -841,7 +886,7 @@ async def jama_get_current_user(ctx: Context) -> dict:
     Returns:
         User object with id, username, firstName, lastName, email, active, licenseType.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_current_user()
 
 
@@ -860,7 +905,7 @@ async def jama_get_tags(ctx: Context, project_id: int) -> list[dict]:
     Returns:
         List of tag objects with id and name.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_tags(project_id)
 
 
@@ -875,7 +920,7 @@ async def jama_create_tag(ctx: Context, project_id: int, name: str) -> dict:
     Returns:
         Created tag object with id and name.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.create_tag(project_id, name)
 
 
@@ -889,7 +934,7 @@ async def jama_get_item_tags(ctx: Context, item_id: int) -> list[dict]:
     Returns:
         List of tag objects with id and name.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_tags(item_id)
 
 
@@ -906,7 +951,7 @@ async def jama_add_item_tag(ctx: Context, item_id: int, tag_id: int) -> dict:
     Returns:
         Confirmation of the tag application.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.add_item_tag(item_id, tag_id)
 
 
@@ -921,7 +966,7 @@ async def jama_remove_item_tag(ctx: Context, item_id: int, tag_id: int) -> str:
     Returns:
         Confirmation message.
     """
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.remove_item_tag(item_id, tag_id)
     return f"Tag {tag_id} removed from item {item_id}."
 
@@ -941,7 +986,7 @@ async def jama_get_item_links(ctx: Context, item_id: int) -> list[dict]:
     Returns:
         List of link objects with id, url, and description.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_links(item_id)
 
 
@@ -962,7 +1007,7 @@ async def jama_create_item_link(
     Returns:
         Created link object with id, url, description.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.create_item_link(item_id, url, description)
 
 
@@ -977,7 +1022,7 @@ async def jama_delete_item_link(ctx: Context, item_id: int, link_id: int) -> str
     Returns:
         Confirmation message.
     """
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_item_link(item_id, link_id)
     return f"Link {link_id} deleted from item {item_id}."
 
@@ -994,7 +1039,7 @@ async def jama_get_item_lock(ctx: Context, item_id: int) -> dict:
     Returns:
         Lock status object with locked (bool) and lockedBy user info.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_lock(item_id)
 
 
@@ -1011,7 +1056,7 @@ async def jama_set_item_lock(ctx: Context, item_id: int, locked: bool) -> dict:
     Returns:
         Updated lock status.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.set_item_lock(item_id, locked)
 
 
@@ -1029,7 +1074,7 @@ async def jama_get_releases(ctx: Context, project_id: int) -> list[dict]:
     Returns:
         List of release objects with id, name, description, releaseDate.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_releases(project_id)
 
 
@@ -1048,7 +1093,7 @@ async def jama_get_reviews(ctx: Context, project_id: int) -> list[dict]:
     Returns:
         List of review objects with id, name, status, and participant info.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_reviews(project_id)
 
 
@@ -1064,7 +1109,7 @@ async def jama_get_item_parent(ctx: Context, item_id: int) -> dict:
     Returns:
         Parent item object, or empty dict if the item is a root.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_parent(item_id)
 
 
@@ -1078,7 +1123,7 @@ async def jama_get_item_location(ctx: Context, item_id: int) -> dict:
     Returns:
         Location object with parent item/project references.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_location(item_id)
 
 
@@ -1102,7 +1147,7 @@ async def jama_set_item_location(
     Returns:
         Updated location info.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.set_item_location(item_id, parent_item, parent_project)
 
 
@@ -1123,7 +1168,7 @@ async def jama_duplicate_item(
     Returns:
         The newly created duplicate item.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.duplicate_item(item_id, include_children)
 
 
@@ -1141,7 +1186,7 @@ async def jama_get_synced_items(ctx: Context, item_id: int) -> list[dict]:
     Returns:
         List of synced item references with target item IDs and sync status.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_synced_items(item_id)
 
 
@@ -1154,7 +1199,7 @@ async def jama_get_users(ctx: Context) -> list[dict]:
     Returns:
         List of user objects with id, username, firstName, lastName, email, active.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_users()
 
 
@@ -1170,7 +1215,7 @@ async def jama_get_item_types(ctx: Context) -> list[dict]:
     Returns:
         List of item type objects with id, display, typeKey, and field definitions.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_types()
 
 
@@ -1184,7 +1229,7 @@ async def jama_get_pick_lists(ctx: Context) -> list[dict]:
     Returns:
         List of pick list objects with id, name, description.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_pick_lists()
 
 
@@ -1198,7 +1243,7 @@ async def jama_get_pick_list_options(ctx: Context, pick_list_id: int) -> list[di
     Returns:
         List of option objects with id, name, value, description, active, default.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_pick_list_options(pick_list_id)
 
 
@@ -1213,7 +1258,7 @@ async def jama_get_user_groups(ctx: Context) -> list[dict]:
     Returns:
         List of user group objects with id, name, description, project.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_user_groups()
 
 
@@ -1232,7 +1277,7 @@ async def jama_get_project_activities(ctx: Context, project_id: int) -> list[dic
     Returns:
         List of activity objects with id, date, action, user, item references.
     """
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_activities(project_id)
 
 
@@ -1252,7 +1297,7 @@ async def jama_get_review_details(ctx: Context, review_id: int) -> dict:
         Dict with 'review' (metadata), 'comments' (list), 'revisions' (list),
         and 'latest_progress' (approval progress for the most recent revision).
     """
-    assert api_client
+    _need(api_client, "api_client")
     review = await api_client.get_review(review_id)
     comments = await api_client.get_review_comments(review_id)
     revisions = await api_client.get_review_revisions(review_id)
@@ -1545,7 +1590,7 @@ async def api_health():
 
 @rest_app.get("/api/projects")
 async def api_projects():
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_projects()
     if cached:
         logger.debug("Returning %d cached projects", len(cached))
@@ -1562,7 +1607,7 @@ async def api_projects():
 
 @rest_app.get("/api/projects/{project_id}")
 async def api_project(project_id: int):
-    assert cache
+    _need(cache, "cache")
     p = await cache.get_project(project_id)
     if not p:
         raise HTTPException(404, "Project not found in cache")
@@ -1573,7 +1618,7 @@ async def api_project(project_id: int):
 
 @rest_app.get("/api/projects/{project_id}/items")
 async def api_items(project_id: int):
-    assert cache
+    _need(cache, "cache")
     return await cache.get_items_by_project(project_id)
 
 
@@ -1584,7 +1629,7 @@ async def api_resolve_item(key: str = Query(..., description="Document key (SET-
     Accepts: SET-43, IQ_BATT_R5-SET-43, CMP-12, or numeric ID 5624955.
     Short keys (SET-43) are matched via suffix (%-SET-43).
     """
-    assert cache
+    _need(cache, "cache")
     k = key.strip()
 
     # Try exact document_key first (e.g. IQ_BATT_R5-SET-43)
@@ -1594,7 +1639,7 @@ async def api_resolve_item(key: str = Query(..., description="Document key (SET-
 
     # Try suffix match for short keys (SET-43 → %-SET-43)
     if not item and "-" in k and not k[0].isdigit():
-        assert cache._db
+        _need(cache, "cache"); _need(cache._db, "cache._db")
         rows = await cache._db.execute_fetchall(
             "SELECT * FROM items WHERE document_key LIKE ? LIMIT 1",
             (f"%-{k}",),
@@ -1621,7 +1666,7 @@ async def api_resolve_item(key: str = Query(..., description="Document key (SET-
 
 @rest_app.get("/api/items/{item_id}")
 async def api_item(item_id: int, live: bool = Query(False)):
-    assert cache
+    _need(cache, "cache")
     if live and api_client:
         try:
             raw = await api_client.get_item(item_id)
@@ -1641,7 +1686,7 @@ async def api_item(item_id: int, live: bool = Query(False)):
 
 @rest_app.get("/api/items/{item_id}/children")
 async def api_item_children(item_id: int, live: bool = Query(False)):
-    assert cache
+    _need(cache, "cache")
     if live and api_client:
         try:
             children = await api_client.get_item_children(item_id)
@@ -1654,7 +1699,7 @@ async def api_item_children(item_id: int, live: bool = Query(False)):
 
 @rest_app.get("/api/items/{item_id}/ancestors")
 async def api_item_ancestors(item_id: int, project_id: int = Query(...)):
-    assert cache
+    _need(cache, "cache")
     items = await cache.get_items_by_project(project_id)
     return get_ancestors(items, item_id)
 
@@ -1663,9 +1708,10 @@ async def api_item_ancestors(item_id: int, project_id: int = Query(...)):
 
 @rest_app.get("/api/projects/{project_id}/tree")
 async def api_tree(project_id: int, root_id: int | None = None):
-    assert cache
+    _need(cache, "cache")
     items = await cache.get_items_by_project(project_id)
-    tree = build_tree(items, root_id)
+    type_map = await _get_item_type_map()
+    tree = build_tree(items, root_id, item_type_map=type_map)
     return [n.model_dump() for n in tree]
 
 
@@ -1673,7 +1719,7 @@ async def api_tree(project_id: int, root_id: int | None = None):
 
 @rest_app.get("/api/items/{item_id}/versions")
 async def api_item_versions(item_id: int):
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_item_version_list(item_id)
     if cached:
         return cached
@@ -1696,7 +1742,7 @@ async def api_item_versions(item_id: int):
 
 @rest_app.get("/api/items/{item_id}/versions/{version_num}")
 async def api_item_at_version(item_id: int, version_num: int):
-    assert cache and api_client
+    _need(cache, "cache"); _need(api_client, "api_client")
     cached = await cache.get_item_version(item_id, version_num)
     if cached:
         return cached
@@ -1720,7 +1766,7 @@ async def api_item_at_version(item_id: int, version_num: int):
 
 @rest_app.get("/api/projects/{project_id}/relationships")
 async def api_relationships(project_id: int):
-    assert cache
+    _need(cache, "cache")
     return await cache.get_relationships(project_id)
 
 
@@ -1730,7 +1776,7 @@ async def _resolve_relationships(rels: list[dict], direction: str) -> list[dict]
     Each relationship has fromItem / toItem IDs.  For 'upstream' we want
     the fromItem details; for 'downstream' we want the toItem details.
     """
-    assert cache
+    _need(cache, "cache")
     results = []
     for r in rels:
         target_id = r.get("fromItem") if direction == "upstream" else r.get("toItem")
@@ -1766,14 +1812,14 @@ async def _resolve_relationships(rels: list[dict], direction: str) -> list[dict]
 
 @rest_app.get("/api/items/{item_id}/upstream")
 async def api_upstream(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     rels = await api_client.get_item_upstream_relationships(item_id)
     return await _resolve_relationships(rels, "upstream")
 
 
 @rest_app.get("/api/items/{item_id}/downstream")
 async def api_downstream(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     rels = await api_client.get_item_downstream_relationships(item_id)
     return await _resolve_relationships(rels, "downstream")
 
@@ -1782,13 +1828,13 @@ async def api_downstream(item_id: int):
 
 @rest_app.get("/api/items/{item_id}/attachments")
 async def api_attachments(item_id: int):
-    assert cache
+    _need(cache, "cache")
     return await cache.get_item_attachments(item_id)
 
 
 @rest_app.get("/api/attachments/{attachment_id}/base64")
 async def api_attachment_base64(attachment_id: int):
-    assert attachment_mgr
+    _need(attachment_mgr, "attachment_mgr")
     return await attachment_mgr.get_attachment_as_base64(attachment_id)
 
 
@@ -1901,7 +1947,7 @@ async def api_cache_jama_image(request: Request, url: str = Query(...)):
 async def api_list_uncached_images():
     """Return a list of all embedded image URLs in cached items that aren't locally cached."""
     from pathlib import Path
-    assert cache
+    _need(cache, "cache")
 
     # Scan all items for embedded image URLs
     uncached = []
@@ -1935,7 +1981,7 @@ async def api_list_uncached_images():
 
 @rest_app.get("/api/search")
 async def api_search(q: str = Query(...), project_id: int | None = None, limit: int = 50):
-    assert search_engine
+    _need(search_engine, "search_engine")
     # Use unified search to cover items + test runs + plans + cycles
     results = await search_engine.unified_search(q, project_id=project_id, limit=limit)
     return [r.model_dump(mode="json") for r in results]
@@ -1951,7 +1997,7 @@ async def api_deep_search(
 ):
     """Holistic search with upstream/downstream relationship context.
     Covers items, test runs, test plans, and test cycles."""
-    assert search_engine
+    _need(search_engine, "search_engine")
     results = await search_engine.unified_deep_search(
         q,
         project_id=project_id,
@@ -1964,25 +2010,25 @@ async def api_deep_search(
 
 @rest_app.get("/api/projects/{project_id}/testplans")
 async def api_test_plans(project_id: int, live: bool = Query(False)):
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_plans(project_id, use_cache=not live)
 
 
 @rest_app.get("/api/testplans/{plan_id}/cycles")
 async def api_test_cycles(plan_id: int, live: bool = Query(False)):
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_cycles(plan_id, use_cache=not live)
 
 
 @rest_app.get("/api/testcycles/{cycle_id}/runs")
 async def api_test_runs(cycle_id: int, live: bool = Query(False)):
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.list_test_runs(cycle_id, use_cache=not live)
 
 
 @rest_app.get("/api/testcycles/{cycle_id}/summary")
 async def api_test_summary(cycle_id: int, live: bool = Query(False)):
-    assert test_manager
+    _need(test_manager, "test_manager")
     if live:
         # Force-refresh runs first so summary reflects latest
         await test_manager.list_test_runs(cycle_id, use_cache=False)
@@ -1992,7 +2038,7 @@ async def api_test_summary(cycle_id: int, live: bool = Query(False)):
 
 @rest_app.get("/api/testplans/{plan_id}/summary")
 async def api_plan_summary(plan_id: int, live: bool = Query(False)):
-    assert test_manager
+    _need(test_manager, "test_manager")
     if live:
         # Force-refresh cycles and their runs so summary is fresh
         cycles = await test_manager.list_test_cycles(plan_id, use_cache=False)
@@ -2003,7 +2049,7 @@ async def api_plan_summary(plan_id: int, live: bool = Query(False)):
 
 @rest_app.put("/api/testruns/{run_id}")
 async def api_update_test_run(run_id: int, body: dict):
-    assert test_manager
+    _need(test_manager, "test_manager")
     status = body.get("status")
     results = body.get("actual_results")
     return await test_manager.update_test_run_status(run_id, status, results)
@@ -2012,7 +2058,7 @@ async def api_update_test_run(run_id: int, body: dict):
 @rest_app.post("/api/testplans/{plan_id}/refresh")
 async def api_refresh_test_plan(plan_id: int):
     """Force-refresh a single test plan in the cache from Jama API."""
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     fresh = await api_client.get_test_plan(plan_id)
     project_id = fresh.get("project", {}).get("id") if isinstance(fresh.get("project"), dict) else (fresh.get("project") or 0)
     await cache.upsert_test_plan(fresh, project_id)
@@ -2022,7 +2068,7 @@ async def api_refresh_test_plan(plan_id: int):
 @rest_app.post("/api/testcycles/{cycle_id}/refresh")
 async def api_refresh_test_cycle(cycle_id: int):
     """Force-refresh a single test cycle in the cache from Jama API."""
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     fresh = await api_client.get_test_cycle(cycle_id)
     plan_id = fresh.get("testPlan", {}).get("id") if isinstance(fresh.get("testPlan"), dict) else (fresh.get("testPlan") or 0)
     await cache.upsert_test_cycle(fresh, plan_id)
@@ -2032,7 +2078,7 @@ async def api_refresh_test_cycle(cycle_id: int):
 @rest_app.post("/api/testruns/{run_id}/refresh")
 async def api_refresh_test_run(run_id: int):
     """Force-refresh a single test run in the cache from Jama API."""
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     fresh = await api_client.get_test_run(run_id)
     cached = await cache.get_test_run(run_id)
     cycle_id = cached["test_cycle_id"] if cached else 0
@@ -2047,7 +2093,7 @@ async def api_refresh_test_run(run_id: int):
 @rest_app.post("/api/items/{item_id}/refresh")
 async def api_refresh_item(item_id: int):
     """Force-refresh a single item in the cache from Jama API."""
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     fresh = await api_client.get_item(item_id)
     await cache.upsert_item(fresh)
     return {"status": "refreshed", "item_id": item_id}
@@ -2055,7 +2101,7 @@ async def api_refresh_item(item_id: int):
 
 @rest_app.post("/api/testplans/{plan_id}/cycles")
 async def api_create_test_cycle(plan_id: int, body: dict):
-    assert test_manager
+    _need(test_manager, "test_manager")
     return await test_manager.create_test_cycle(
         plan_id,
         name=body["name"],
@@ -2069,7 +2115,7 @@ async def api_create_test_cycle(plan_id: int, body: dict):
 
 @rest_app.post("/api/sync/{project_id}")
 async def api_sync(project_id: int, incremental: bool = False):
-    assert sync_engine
+    _need(sync_engine, "sync_engine")
     cb = progress_bus.make_callback()
     if incremental:
         asyncio.create_task(sync_engine.incremental_sync(project_id, on_progress=cb))
@@ -2090,7 +2136,7 @@ async def api_sync_progress():
 
 @rest_app.get("/api/sync/{project_id}/last")
 async def api_last_sync(project_id: int):
-    assert cache
+    _need(cache, "cache")
     return await cache.get_last_sync(project_id)
 
 
@@ -2098,14 +2144,14 @@ async def api_last_sync(project_id: int):
 
 @rest_app.put("/api/items/{item_id}")
 async def api_update_item(item_id: int, body: dict):
-    assert writer
+    _need(writer, "writer")
     fields = body.get("fields", body)
     return await writer.update_item_fields(item_id, fields)
 
 
 @rest_app.post("/api/items")
 async def api_create_item(body: dict):
-    assert writer
+    _need(writer, "writer")
     return await writer.create_item(
         project_id=body["project_id"],
         item_type_id=body["item_type_id"],
@@ -2116,7 +2162,7 @@ async def api_create_item(body: dict):
 
 @rest_app.delete("/api/items/{item_id}")
 async def api_delete_item(item_id: int):
-    assert writer
+    _need(writer, "writer")
     await writer.delete_item(item_id)
     return {"status": "deleted", "item_id": item_id}
 
@@ -2136,7 +2182,7 @@ async def api_add_comment(item_id: int, body: dict):
 
 @rest_app.post("/api/relationships")
 async def api_create_relationship(body: dict):
-    assert writer
+    _need(writer, "writer")
     return await writer.create_relationship(
         from_item=body["from_item"],
         to_item=body["to_item"],
@@ -2146,14 +2192,14 @@ async def api_create_relationship(body: dict):
 
 @rest_app.delete("/api/relationships/{relationship_id}")
 async def api_delete_relationship(relationship_id: int):
-    assert writer
+    _need(writer, "writer")
     await writer.delete_relationship(relationship_id)
     return {"status": "deleted", "relationship_id": relationship_id}
 
 
 @rest_app.get("/api/relationshiptypes")
 async def api_relationship_types():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_relationship_types()
 
 
@@ -2161,7 +2207,7 @@ async def api_relationship_types():
 
 @rest_app.get("/api/items/{item_id}/export")
 async def api_export_item(item_id: int, format: str = "md"):
-    assert exporter
+    _need(exporter, "exporter")
     fmt = ExportFormat(format)
     content = await exporter.export_item(item_id, fmt)
     return {"content": content, "format": format}
@@ -2169,7 +2215,7 @@ async def api_export_item(item_id: int, format: str = "md"):
 
 @rest_app.get("/api/projects/{project_id}/export")
 async def api_export_tree(project_id: int, format: str = "md", root_id: int | None = None):
-    assert exporter
+    _need(exporter, "exporter")
     fmt = ExportFormat(format)
     content = await exporter.export_tree(project_id, root_id, fmt)
     return {"content": content, "format": format}
@@ -2179,7 +2225,7 @@ async def api_export_tree(project_id: int, format: str = "md", root_id: int | No
 
 @rest_app.get("/api/stats")
 async def api_stats():
-    assert cache
+    _need(cache, "cache")
     return await cache.get_stats()
 
 
@@ -2187,13 +2233,13 @@ async def api_stats():
 
 @rest_app.get("/api/items/{item_id}/workflowtransitions")
 async def api_workflow_options(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_workflow_transition_options(item_id)
 
 
 @rest_app.post("/api/items/{item_id}/workflowtransitions")
 async def api_workflow_execute(item_id: int, body: dict):
-    assert api_client and cache
+    _need(api_client, "api_client"); _need(cache, "cache")
     result = await api_client.execute_workflow_transition(
         item_id, body["transitionId"], body.get("comment", "")
     )
@@ -2210,69 +2256,69 @@ async def api_workflow_execute(item_id: int, body: dict):
 
 @rest_app.get("/api/items/{item_id}/activities")
 async def api_item_activities(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_activities(item_id)
 
 
 @rest_app.get("/api/items/{item_id}/links")
 async def api_item_links(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_links(item_id)
 
 
 @rest_app.post("/api/items/{item_id}/links")
 async def api_create_item_link(item_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.create_item_link(item_id, body["url"], body.get("description", ""))
 
 
 @rest_app.delete("/api/items/{item_id}/links/{link_id}")
 async def api_delete_item_link(item_id: int, link_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_item_link(item_id, link_id)
     return {"status": "deleted"}
 
 
 @rest_app.get("/api/items/{item_id}/tags")
 async def api_item_tags(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_tags(item_id)
 
 
 @rest_app.post("/api/items/{item_id}/tags")
 async def api_add_item_tag(item_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.add_item_tag(item_id, body["tag"])
 
 
 @rest_app.delete("/api/items/{item_id}/tags/{tag_id}")
 async def api_remove_item_tag(item_id: int, tag_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.remove_item_tag(item_id, tag_id)
     return {"status": "deleted"}
 
 
 @rest_app.get("/api/items/{item_id}/lock")
 async def api_item_lock(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_lock(item_id)
 
 
 @rest_app.put("/api/items/{item_id}/lock")
 async def api_set_item_lock(item_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.set_item_lock(item_id, body["locked"])
 
 
 @rest_app.get("/api/items/{item_id}/location")
 async def api_item_location(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_location(item_id)
 
 
 @rest_app.put("/api/items/{item_id}/location")
 async def api_set_item_location(item_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     parent = body.get("parent", {})
     return await api_client.set_item_location(
         item_id, parent_item=parent.get("item"), parent_project=parent.get("project")
@@ -2281,19 +2327,19 @@ async def api_set_item_location(item_id: int, body: dict):
 
 @rest_app.post("/api/items/{item_id}/duplicate")
 async def api_duplicate_item(item_id: int, body: dict = {}):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.duplicate_item(item_id, body.get("includeChildren", False))
 
 
 @rest_app.get("/api/items/{item_id}/synceditems")
 async def api_synced_items(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_synced_items(item_id)
 
 
 @rest_app.get("/api/items/{item_id}/comments")
 async def api_item_comments(item_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_comments(item_id)
 
 
@@ -2301,31 +2347,31 @@ async def api_item_comments(item_id: int):
 
 @rest_app.get("/api/attachments/{attachment_id}")
 async def api_attachment_meta(attachment_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_attachment(attachment_id)
 
 
 @rest_app.get("/api/attachments/{attachment_id}/comments")
 async def api_attachment_comments(attachment_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_attachment_comments(attachment_id)
 
 
 @rest_app.get("/api/attachments/{attachment_id}/lock")
 async def api_attachment_lock(attachment_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_attachment_lock(attachment_id)
 
 
 @rest_app.put("/api/attachments/{attachment_id}/lock")
 async def api_set_attachment_lock(attachment_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.set_attachment_lock(attachment_id, body["locked"])
 
 
 @rest_app.get("/api/attachments/{attachment_id}/versions")
 async def api_attachment_versions(attachment_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_attachment_versions(attachment_id)
 
 
@@ -2333,25 +2379,25 @@ async def api_attachment_versions(attachment_id: int):
 
 @rest_app.get("/api/projects/{project_id}/activities")
 async def api_activities(project_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_activities(project_id)
 
 
 @rest_app.get("/api/activities/{activity_id}")
 async def api_activity(activity_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_activity(activity_id)
 
 
 @rest_app.get("/api/activities/{activity_id}/affecteditems")
 async def api_activity_affected(activity_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_activity_affected_items(activity_id)
 
 
 @rest_app.post("/api/activities/{activity_id}/restore")
 async def api_restore_activity(activity_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.restore_activity(activity_id)
 
 
@@ -2359,25 +2405,25 @@ async def api_restore_activity(activity_id: int):
 
 @rest_app.get("/api/projects/{project_id}/baselines")
 async def api_baselines(project_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_baselines(project_id)
 
 
 @rest_app.get("/api/baselines/{baseline_id}")
 async def api_baseline(baseline_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_baseline(baseline_id)
 
 
 @rest_app.get("/api/baselines/{baseline_id}/versioneditems")
 async def api_baseline_items(baseline_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_baseline_versioned_items(baseline_id)
 
 
 @rest_app.delete("/api/baselines/{baseline_id}")
 async def api_delete_baseline(baseline_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_baseline(baseline_id)
     return {"status": "deleted"}
 
@@ -2386,25 +2432,25 @@ async def api_delete_baseline(baseline_id: int):
 
 @rest_app.get("/api/projects/{project_id}/releases")
 async def api_releases(project_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_releases(project_id)
 
 
 @rest_app.get("/api/releases/{release_id}")
 async def api_release(release_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_release(release_id)
 
 
 @rest_app.post("/api/releases")
 async def api_create_release(body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.create_release(body["project"], body.get("fields", {}))
 
 
 @rest_app.put("/api/releases/{release_id}")
 async def api_update_release(release_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.update_release(release_id, body.get("fields", body))
 
 
@@ -2412,25 +2458,25 @@ async def api_update_release(release_id: int, body: dict):
 
 @rest_app.get("/api/projects/{project_id}/tags")
 async def api_tags(project_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_tags(project_id)
 
 
 @rest_app.post("/api/tags")
 async def api_create_tag(body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.create_tag(body["project"], body["name"])
 
 
 @rest_app.put("/api/tags/{tag_id}")
 async def api_update_tag(tag_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.update_tag(tag_id, body["name"])
 
 
 @rest_app.delete("/api/tags/{tag_id}")
 async def api_delete_tag(tag_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_tag(tag_id)
     return {"status": "deleted"}
 
@@ -2439,7 +2485,7 @@ async def api_delete_tag(tag_id: int):
 
 @rest_app.post("/api/comments")
 async def api_create_comment(body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.create_comment(
         body_text=body.get("text", body.get("body", "")),
         item_id=body.get("item_id"),
@@ -2449,7 +2495,7 @@ async def api_create_comment(body: dict):
 
 @rest_app.get("/api/comments/{comment_id}/replies")
 async def api_comment_replies(comment_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_comment_replies(comment_id)
 
 
@@ -2457,19 +2503,19 @@ async def api_comment_replies(comment_id: int):
 
 @rest_app.get("/api/usergroups")
 async def api_user_groups():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_user_groups()
 
 
 @rest_app.get("/api/usergroups/{group_id}")
 async def api_user_group(group_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_user_group(group_id)
 
 
 @rest_app.get("/api/usergroups/{group_id}/users")
 async def api_user_group_users(group_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_user_group_users(group_id)
 
 
@@ -2477,19 +2523,19 @@ async def api_user_group_users(group_id: int):
 
 @rest_app.get("/api/users")
 async def api_users():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_users()
 
 
 @rest_app.get("/api/users/current")
 async def api_current_user():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_current_user()
 
 
 @rest_app.get("/api/users/{user_id}")
 async def api_user(user_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_user(user_id)
 
 
@@ -2497,19 +2543,19 @@ async def api_user(user_id: int):
 
 @rest_app.get("/api/projects/{project_id}/filters")
 async def api_filters(project_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_filters(project_id)
 
 
 @rest_app.get("/api/filters/{filter_id}/results")
 async def api_filter_results(filter_id: int, project: int = 0):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_filter_results(filter_id, project)
 
 
 @rest_app.get("/api/filters/{filter_id}/count")
 async def api_filter_count(filter_id: int, project: int = 0):
-    assert api_client
+    _need(api_client, "api_client")
     return {"count": await api_client.get_filter_count(filter_id, project)}
 
 
@@ -2517,31 +2563,31 @@ async def api_filter_count(filter_id: int, project: int = 0):
 
 @rest_app.get("/api/projects/{project_id}/reviews")
 async def api_reviews(project_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_reviews(project_id)
 
 
 @rest_app.get("/api/reviews/{review_id}")
 async def api_review(review_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_review(review_id)
 
 
 @rest_app.get("/api/reviews/{review_id}/comments")
 async def api_review_comments(review_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_review_comments(review_id)
 
 
 @rest_app.get("/api/reviews/{review_id}/revisions")
 async def api_review_revisions(review_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_review_revisions(review_id)
 
 
 @rest_app.get("/api/reviews/{review_id}/revisions/{revision_id}/progress")
 async def api_review_revision_progress(review_id: int, revision_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_review_revision_progress(review_id, revision_id)
 
 
@@ -2549,38 +2595,38 @@ async def api_review_revision_progress(review_id: int, revision_id: int):
 
 @rest_app.put("/api/testplans/{plan_id}")
 async def api_update_test_plan(plan_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.update_test_plan(plan_id, body.get("fields", body))
 
 
 @rest_app.delete("/api/testplans/{plan_id}")
 async def api_delete_test_plan(plan_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_test_plan(plan_id)
     return {"status": "deleted"}
 
 
 @rest_app.get("/api/testplans/{plan_id}/attachments")
 async def api_test_plan_attachments(plan_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_plan_attachments(plan_id)
 
 
 @rest_app.get("/api/testplans/{plan_id}/links")
 async def api_test_plan_links(plan_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_plan_links(plan_id)
 
 
 @rest_app.get("/api/testplans/{plan_id}/tags")
 async def api_test_plan_tags(plan_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_plan_tags(plan_id)
 
 
 @rest_app.get("/api/testplans/{plan_id}/versions")
 async def api_test_plan_versions(plan_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_plan_versions(plan_id)
 
 
@@ -2588,20 +2634,20 @@ async def api_test_plan_versions(plan_id: int):
 
 @rest_app.put("/api/testcycles/{cycle_id}")
 async def api_update_test_cycle(cycle_id: int, body: dict):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.update_test_cycle(cycle_id, body.get("fields", body))
 
 
 @rest_app.delete("/api/testcycles/{cycle_id}")
 async def api_delete_test_cycle(cycle_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_test_cycle(cycle_id)
     return {"status": "deleted"}
 
 
 @rest_app.get("/api/testcycles/{cycle_id}/versions")
 async def api_test_cycle_versions(cycle_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_cycle_versions(cycle_id)
 
 
@@ -2609,38 +2655,38 @@ async def api_test_cycle_versions(cycle_id: int):
 
 @rest_app.delete("/api/testruns/{run_id}")
 async def api_delete_test_run(run_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     await api_client.delete_test_run(run_id)
     return {"status": "deleted"}
 
 
 @rest_app.get("/api/testruns/{run_id}/attachments")
 async def api_test_run_attachments(run_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_run_attachments(run_id)
 
 
 @rest_app.get("/api/testruns/{run_id}/links")
 async def api_test_run_links(run_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_run_links(run_id)
 
 
 @rest_app.get("/api/testruns/{run_id}/tags")
 async def api_test_run_tags(run_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_run_tags(run_id)
 
 
 @rest_app.get("/api/testruns/{run_id}/versions")
 async def api_test_run_versions(run_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_run_versions(run_id)
 
 
 @rest_app.get("/api/testruns/{run_id}/comments")
 async def api_test_run_comments(run_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_test_run_comments(run_id)
 
 
@@ -2648,25 +2694,34 @@ async def api_test_run_comments(run_id: int):
 
 @rest_app.get("/api/picklists")
 async def api_pick_lists():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_pick_lists()
 
 
 @rest_app.get("/api/picklists/{pick_list_id}/options")
 async def api_pick_list_options(pick_list_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_pick_list_options(pick_list_id)
 
 
 @rest_app.get("/api/itemtypes")
 async def api_item_types():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_types()
+
+
+@rest_app.post("/api/itemtypes/refresh")
+async def api_refresh_item_types():
+    """Clear and repopulate the in-process item_type display-name cache."""
+    global _item_type_display_map
+    _item_type_display_map = {}
+    fresh = await _get_item_type_map()
+    return {"refreshed": len(fresh), "types": fresh}
 
 
 @rest_app.get("/api/itemtypes/{type_id}")
 async def api_item_type(type_id: int):
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_item_type(type_id)
 
 
@@ -2674,7 +2729,7 @@ async def api_item_type(type_id: int):
 
 @rest_app.get("/api/relationshiprulesets")
 async def api_relationship_rulesets():
-    assert api_client
+    _need(api_client, "api_client")
     return await api_client.get_relationship_rulesets()
 
 

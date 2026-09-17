@@ -194,7 +194,8 @@ class ServiceRegistry:
         self.cache_manager = CacheManager(cache_dir)
         await self.cache_manager.open()
 
-        self.sync_engine = SyncEngine(self.api_client, self.cache)
+        # Pass cache_manager so SyncEngine dual-writes to per-project DBs (P1 fix)
+        self.sync_engine = SyncEngine(self.api_client, self.cache, cache_manager=self.cache_manager)
         self.test_manager = TestManager(self.api_client, self.cache)
         self.writer = Writer(self.api_client, self.cache)
         self.exporter = Exporter(self.cache)

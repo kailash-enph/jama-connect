@@ -40,6 +40,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
+# P6: prefer bcrypt for password hashing; fall back to SHA-256 with a warning
+try:
+    import bcrypt as _bcrypt
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _bcrypt = None  # type: ignore[assignment]
+    _BCRYPT_AVAILABLE = False
+    logger_pre = logging.getLogger(__name__)
+    logger_pre.warning(
+        "bcrypt not installed — using SHA-256 password hashing (install 'bcrypt' for better security)"
+    )
+
 # ── logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +66,7 @@ _GENERATE_SCRIPT = _HERE / "scripts" / "generate_caches.py"
 _ENV_FILE = _HERE / ".env"
 _CONFIG_PATH = _HERE / "server_config.json"
 _DATA_DIR = _HERE / "data"
+_SESSIONS_DB = _HERE / "sessions.db"           # P5: persistent SQLite sessions
 
 # ── schedule constants ────────────────────────────────────────────────────────
 SCHEDULE_SECONDS: dict[str, int] = {
@@ -79,7 +92,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 # ── mutable globals ───────────────────────────────────────────────────────────
-_sessions: dict[str, datetime] = {}           # token -> expiry
+# P5: sessions stored in SQLite (persistent across restarts); _sessions is a
+# write-through in-memory cache so hot-path checks stay fast.
+_sessions: dict[str, datetime] = {}           # token -> expiry (in-memory cache)
 _sync_running: bool = False
 _sync_log: list[str] = []                     # rolling buffer (last 500 lines)
 _sync_subscribers: set[asyncio.Queue] = set()
@@ -108,19 +123,117 @@ def save_config(cfg: dict[str, Any]) -> None:
     logger.info("Config saved: projects=%s  schedule=%s", cfg.get("projects"), cfg.get("schedule"))
 
 
+# P6: bcrypt password hashing with SHA-256 fallback
 def _hash_pw(pw: str) -> str:
+    """Hash a plaintext password for storage.
+
+    Uses bcrypt when available (work factor 12); falls back to SHA-256.
+    Stored format: "bcrypt:<hash>" or "sha256:<hex>".
+    """
+    if _BCRYPT_AVAILABLE:
+        hashed = _bcrypt.hashpw(pw.encode("utf-8"), _bcrypt.gensalt(rounds=12))
+        return "bcrypt:" + hashed.decode("utf-8")
     return "sha256:" + hashlib.sha256(pw.encode("utf-8")).hexdigest()
 
 
 def _verify_pw(pw: str, stored: str) -> bool:
-    return bool(stored) and _hash_pw(pw) == stored
+    """Verify a plaintext password against a stored hash.
+
+    Handles both bcrypt and legacy sha256 hashes transparently so old
+    hashes continue to work after upgrading.
+    """
+    if not stored:
+        return False
+    if stored.startswith("bcrypt:"):
+        if not _BCRYPT_AVAILABLE:
+            # Can't verify bcrypt without the library — fail safe
+            return False
+        try:
+            return _bcrypt.checkpw(pw.encode("utf-8"), stored[7:].encode("utf-8"))
+        except Exception:
+            return False
+    # Legacy SHA-256
+    return stored == "sha256:" + hashlib.sha256(pw.encode("utf-8")).hexdigest()
+
+
+# ── P5: SQLite-backed session persistence ─────────────────────────────────────
+
+def _init_sessions_db() -> None:
+    """Create the sessions table if it does not exist, and load active sessions into memory."""
+    conn = sqlite3.connect(str(_SESSIONS_DB))
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                expires_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        # Load non-expired sessions into the in-memory cache
+        now = datetime.now(timezone.utc).isoformat()
+        rows = conn.execute(
+            "SELECT token, expires_at FROM sessions WHERE expires_at > ?", (now,)
+        ).fetchall()
+        for token, exp_str in rows:
+            try:
+                _sessions[token] = datetime.fromisoformat(exp_str)
+            except ValueError:
+                pass
+        # Prune expired rows
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+        conn.commit()
+        logger.info("Session store ready: %d active session(s) restored", len(_sessions))
+    finally:
+        conn.close()
+
+
+def _session_db_write(token: str, expires_at: datetime) -> None:
+    """Persist a new session token to SQLite (fire-and-forget, non-blocking)."""
+    def _write():
+        try:
+            conn = sqlite3.connect(str(_SESSIONS_DB))
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (token, expires_at) VALUES (?, ?)",
+                (token, expires_at.isoformat()),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.warning("Session DB write failed: %s", exc)
+    threading.Thread(target=_write, daemon=True).start()
+
+
+def _session_db_delete(token: str) -> None:
+    """Remove a session token from SQLite (fire-and-forget)."""
+    def _delete():
+        try:
+            conn = sqlite3.connect(str(_SESSIONS_DB))
+            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.warning("Session DB delete failed: %s", exc)
+    threading.Thread(target=_delete, daemon=True).start()
+
+
+def _session_db_clear() -> None:
+    """Delete all sessions from SQLite (e.g. after password change)."""
+    try:
+        conn = sqlite3.connect(str(_SESSIONS_DB))
+        conn.execute("DELETE FROM sessions")
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning("Session DB clear failed: %s", exc)
 
 
 # ── session helpers ───────────────────────────────────────────────────────────
 
 def _new_session() -> str:
     token = secrets.token_hex(32)
-    _sessions[token] = datetime.now(timezone.utc) + SESSION_LIFETIME
+    expires_at = datetime.now(timezone.utc) + SESSION_LIFETIME
+    _sessions[token] = expires_at
+    _session_db_write(token, expires_at)   # P5: persist
     return token
 
 
@@ -132,6 +245,7 @@ def _session_valid(token: Optional[str]) -> bool:
         return False
     if datetime.now(timezone.utc) > exp:
         _sessions.pop(token, None)
+        _session_db_delete(token)   # P5: remove from DB
         return False
     return True
 
@@ -325,6 +439,8 @@ except ImportError as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scheduler_task
+    # P5: initialize persistent session store and restore active sessions
+    _init_sessions_db()
     # Seed per-project schedule entries for any projects that pre-date this feature
     cfg = load_config()
     overrides: dict = cfg.setdefault("project_schedules", {})
@@ -849,6 +965,8 @@ def admin_login(body: LoginBody, response: Response):
 def admin_logout(request: Request, response: Response):
     token = _get_token(request)
     _sessions.pop(token, None)
+    if token:
+        _session_db_delete(token)   # P5: remove from persistent store
     response.delete_cookie("admin_token")
     return {"ok": True}
 
@@ -1093,7 +1211,8 @@ def change_password(body: PasswordBody, request: Request, response: Response, _:
         raise HTTPException(400, "New password must be at least 6 characters")
     cfg["admin_password_hash"] = _hash_pw(body.new_password)
     save_config(cfg)
-    _sessions.clear()                           # invalidate all sessions
+    _sessions.clear()                           # P5: invalidate all sessions (memory)
+    _session_db_clear()                         # P5: invalidate all sessions (DB)
     response.delete_cookie("admin_token")
     return {"ok": True, "message": "Password changed — please log in again"}
 

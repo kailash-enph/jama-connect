@@ -18,10 +18,15 @@ RUN useradd -m -u 1000 jama
 WORKDIR /app
 
 # ── Install Python dependencies ───────────────────────────────────────────────
+# bcrypt requires libffi + gcc on slim images
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libffi-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 # jama_mcp_v2 — required by generate_caches.py (sync subprocess)
 COPY client/backend/pyproject.toml client/backend/
 COPY client/backend/src/           client/backend/src/
-RUN pip install --no-cache-dir ./client/backend
+RUN pip install --no-cache-dir ./client/backend bcrypt>=4.0.0
 
 # ── Copy server code ──────────────────────────────────────────────────────────
 COPY server/ .

@@ -10,18 +10,27 @@ from .models import TreeNode
 logger = logging.getLogger(__name__)
 
 
-def build_tree(items: list[dict[str, Any]], root_id: int | None = None) -> list[TreeNode]:
+def build_tree(
+    items: list[dict[str, Any]],
+    root_id: int | None = None,
+    item_type_map: dict[int, str] | None = None,
+) -> list[TreeNode]:
     """Build a tree of TreeNodes from a flat list of cached items.
 
     Args:
         items: List of item dicts (from cache.get_items_by_project).
         root_id: If provided, only build the subtree under this item.
+        item_type_map: Optional mapping of item_type integer ID → display name
+            (e.g. {81: "Requirement", 82: "Test Case"}). When provided,
+            ``TreeNode.item_type_display`` is populated so the VS Code
+            extension can show per-type icons.
 
     Returns:
         List of root-level TreeNodes with children populated.
     """
     by_id: dict[int, dict[str, Any]] = {item["id"]: item for item in items}
     children_map: dict[int | None, list[int]] = {}
+    type_map: dict[int, str] = item_type_map or {}
 
     for item in items:
         pid = item.get("parent_id")
@@ -38,11 +47,13 @@ def build_tree(items: list[dict[str, Any]], root_id: int | None = None) -> list[
             child_label = f"{section_prefix}.{idx}" if section_prefix else str(idx)
             child_nodes.append(_build(cid, level + 1, child_label))
 
+        itype = item.get("item_type", 0)
         return TreeNode(
             id=item_id,
             name=item.get("name", ""),
             document_key=item.get("document_key", ""),
-            item_type=item.get("item_type", 0),
+            item_type=itype,
+            item_type_display=type_map.get(itype, ""),
             parent_id=item.get("parent_id"),
             has_children=len(child_nodes) > 0,
             level=level,
