@@ -113,21 +113,24 @@ export class ProjectTreeProvider
 
   private api: ApiClient;
   private selector: ProjectSelector;
-  private treeCache: JamaTreeNode[] = [];
+  // null  = not yet fetched for this project (fetch on next getChildren call)
+  // []    = fetched but project has no cached items (show "not synced" hint)
+  // [...] = fetched items
+  private treeCache: JamaTreeNode[] | null = null;
 
   constructor(api: ApiClient, selector: ProjectSelector) {
     this.api = api;
     this.selector = selector;
 
-    // React to project selection changes
+    // React to project selection changes — reset cache so new project loads
     selector.onDidChange(() => {
-      this.treeCache = [];
+      this.treeCache = null;
       this._onDidChangeTreeData.fire();
     });
   }
 
   refresh(): void {
-    this.treeCache = [];
+    this.treeCache = null;
     this._onDidChangeTreeData.fire();
   }
 
@@ -172,8 +175,23 @@ export class ProjectTreeProvider
     projectId: number
   ): Promise<JamaTreeItem[]> {
     try {
-      if (this.treeCache.length === 0) {
+      // null means we haven't fetched yet for this project
+      if (this.treeCache === null) {
         this.treeCache = await this.api.getItemTree(projectId);
+      }
+      // Empty array means the project exists but has no cached items
+      if (this.treeCache.length === 0) {
+        const hint = new JamaTreeItem(
+          "No items cached for this project",
+          vscode.TreeItemCollapsibleState.None
+        );
+        hint.description = "Open DB Manager to download or sync";
+        hint.iconPath = new vscode.ThemeIcon("cloud-download");
+        hint.command = {
+          command: "jamaEditor.manageProjectDbs",
+          title: "Manage Project Databases",
+        };
+        return [hint];
       }
       return this.treeCache.map((node) =>
         this.nodeToTreeItem(node, projectId)
@@ -189,7 +207,7 @@ export class ProjectTreeProvider
     projectId: number,
     parentId: number
   ): JamaTreeItem[] {
-    const parent = this.findNode(this.treeCache, parentId);
+    const parent = this.findNode(this.treeCache ?? [], parentId);
     if (!parent || !parent.children) {
       return [];
     }
