@@ -270,7 +270,7 @@ class SyncEngine:
 
         try:
             rels = await self._api.get_relationships(project_id)
-            await project_db.upsert_relationships_batch(rels, project_id)
+            await project_db.upsert_relationships_batch(rels)
             logger.info("Project %d: %d relationships synced", project_id, len(rels))
         except JamaApiError as e:
             logger.warning(

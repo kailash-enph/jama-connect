@@ -594,15 +594,17 @@ The zip bundles a pre-built `jama_connect-*.whl` wheel so the Docker image doesn
 
 ## 5. Technical Debt — Prioritised
 
-### P1 — Dual cache tracks with no migration path *(highest risk)*
+### P1 — Dual cache tracks with no migration path ~~*(highest risk)*~~ **RESOLVED**
 
-**Problem:** `JamaCache` (legacy) and `ProjectDb` (new) run in parallel. MCP tools sync to and read from `cache.db`. The VS Code extension reads from `projects/{id}.db`. A full sync via `jama_sync_project` does NOT update the per-project DB. A LAN download does NOT update `cache.db`. The two caches will diverge.
+**Was:** `JamaCache` and `ProjectDb` ran in parallel. MCP tools read `cache.db`; extension read `projects/{id}.db`. Data diverged silently.
 
-**Blast radius:** AI tool results and extension tree view can show different data for the same project. This is silent — no error, no warning.
-
-**Fix:** Either (a) make `SyncEngine` write to both tracks in parallel, or (b) eliminate `JamaCache` and migrate all MCP tools to use `CacheManager`. Option (b) is the correct long-term fix but requires touching every MCP tool.
-
-**Effort:** Medium (1–2 weeks for option b, significant test coverage needed).
+**Resolution (commit `7521df5`):** `ProjectDb` is now the single source of truth for ALL reads and writes:
+- `SyncEngine` writes ONLY to `ProjectDb`. `JamaCache` is no longer written during sync.
+- All REST endpoints (`/api/projects/{id}/tree`, `/api/items/*`, `/api/projects/{id}/relationships`) read from `ProjectDb` exclusively.
+- All MCP tool handlers (`jama_get_item`, `jama_get_item_tree`, `jama_get_relationships`, etc.) read from `ProjectDb`.
+- `SearchEngine` rewritten to query `ProjectDb`'s `unified_fts` FTS5 table; `JamaCache` import removed.
+- `ServiceRegistry.set_active_project(pid)` opens the `ProjectDb` and updates `SearchEngine` on every project switch.
+- `JamaCache` (`cache.db`) is now the edit-action log only (undo/redo, user key entries during write-back).
 
 ---
 
@@ -619,9 +621,9 @@ The zip bundles a pre-built `jama_connect-*.whl` wheel so the Docker image doesn
 
 ---
 
-### P3 — MCP tools use `assert` for guard checks *(reliability)*
+### P3 — MCP tools use `assert` for guard checks ~~*(reliability)*~~ **RESOLVED**
 
-**Problem:** Every tool begins with `assert cache and api_client`. If services aren't initialized (startup race, credential failure), the tool raises `AssertionError` — which the MCP client sees as an unhandled exception, not a user-friendly error.
+**Was:** Every tool began with `assert cache and api_client`, raising `AssertionError` on uninitialized services.
 
 **Fix:** Replace `assert` with:
 ```python
@@ -648,9 +650,9 @@ Or use a `@require_services` decorator.
 
 ---
 
-### P5 — Admin sessions lost on container restart *(UX)*
+### P5 — Admin sessions lost on container restart ~~*(UX)*~~ **RESOLVED**
 
-**Problem:** `_sessions: dict[str, datetime]` is a module-level variable. Every `docker compose restart` invalidates all logged-in admin sessions. Admins must re-authenticate after every restart.
+**Was:** `_sessions` was a module-level dict, lost on every restart.
 
 **Fix (simple):** Persist sessions to a `sessions` SQLite table in the data volume.
 **Fix (better):** Replace session tokens with signed JWTs (no server state needed).
@@ -659,9 +661,9 @@ Or use a `@require_services` decorator.
 
 ---
 
-### P6 — Admin password uses SHA-256 *(security)*
+### P6 — Admin password uses SHA-256 ~~*(security)*~~ **RESOLVED**
 
-**Problem:** `_hash_pw(pw)` computes `hashlib.sha256(pw.encode()).hexdigest()`. SHA-256 is a fast hash, not designed for passwords. A GPU can test billions of SHA-256 hashes per second.
+**Was:** SHA-256 fast hash — trivially brute-forced.
 
 **Fix:** Replace with `bcrypt` or `argon2-cffi`:
 ```python
@@ -674,13 +676,11 @@ valid  = bcrypt.checkpw(pw.encode(), stored.encode())
 
 ---
 
-### P7 — `SearchEngine` is hardwired to `JamaCache` *(feature gap)*
+### P7 — `SearchEngine` is hardwired to `JamaCache` ~~*(feature gap)*~~ **RESOLVED**
 
-**Problem:** `SearchEngine.__init__(self, cache: JamaCache)` — it can only search the legacy single-file cache. Projects in the new `ProjectDb` system are invisible to `jama_search` and `jama_deep_search` MCP tools.
+**Was:** `SearchEngine` could only search `cache.db`; ProjectDb items were invisible to MCP search tools.
 
-**Fix:** Either (a) refactor `SearchEngine` to accept a `CacheManager` and query all open `ProjectDb` instances, or (b) resolve P1 first (unify caches) which makes this moot.
-
-**Effort:** Medium (depends on P1 resolution).
+**Resolution (commit `7521df5`):** `SearchEngine` now takes a `ProjectDb | None`, queries `unified_fts` directly on the active project's DB. `JamaCache` import removed entirely. Scoped to the active project (search is always within the selected project, not cross-project).
 
 ---
 
@@ -719,13 +719,11 @@ valid  = bcrypt.checkpw(pw.encode(), stored.encode())
 
 ---
 
-### P10 — `item_type_display` is always empty *(UX)*
+### P10 — `item_type_display` is always empty ~~*(UX)*~~ **RESOLVED**
 
-**Problem:** `GET /api/projects/{id}/tree` returns `"item_type_display": ""` for every item. The extension's `getItemIcon()` checks this field for "requirement", "test", "component", etc., and always falls back to `symbol-misc` because the string is always empty. All items show the same icon.
+**Was:** Tree endpoint returned `"item_type_display": ""` for all items — all showed the same icon.
 
-**Fix:** Either populate `item_type_display` in the backend tree endpoint by joining with `item_types` table, or in the frontend map `item_type` (integer ID) to a display string using a separately fetched `item_types` list.
-
-**Effort:** Low (2–3 hours).
+**Resolution:** Tree endpoint now fetches item types from Jama API once per process lifetime via an in-memory map and populates `item_type_display` on every node.
 
 ---
 
@@ -757,32 +755,38 @@ Or use an explicit allowlist and add a CSRF token for state-changing operations.
 
 ## 6. Robustness Roadmap
 
-### Short-term (days)
+### Completed
 
-| Item | What | File |
+| Item | What | Commit |
 |---|---|---|
-| P3 | Replace `assert` guards with `ToolError` in all MCP tools | `server.py` |
-| P5 | Persist admin sessions to SQLite | `cache_server.py` |
-| P10 | Populate `item_type_display` in tree endpoint | `server.py` (REST route) |
-| P6 | Switch to bcrypt for admin password | `cache_server.py` |
+| **P1** | Unified DB: `ProjectDb` is sole data store; `JamaCache` is edit log only | `7521df5` |
+| **P3** | `assert` guards → `_need()` helper raising `HTTPException(503)` | `7c1ad92` |
+| **P5** | Admin sessions persisted to `sessions.db` (SQLite) | `7c1ad92` |
+| **P6** | bcrypt password hashing (work factor 12) with SHA-256 fallback | `7c1ad92` |
+| **P7** | `SearchEngine` rewritten to query `ProjectDb` FTS5 | `7521df5` |
+| **P10** | `item_type_display` populated from Jama API item-types map | `7c1ad92` |
 
-### Medium-term (weeks)
+### Remaining — Short-term (days)
 
 | Item | What | Files |
 |---|---|---|
-| P1 | Make `SyncEngine` write to both `JamaCache` AND `ProjectDb` in parallel | `sync.py`, `services.py` |
-| P2 | Extract inline REST routes from `server.py` into `api/` routers | `server.py`, `api/*.py` |
-| P7 | Extend `SearchEngine` to query `CacheManager` (after P1) | `search.py`, `services.py` |
 | P9 | Add tests for `sync.py`, `tree.py`, `search.py`, `api_client.py` | `tests/` |
+| P12 | Restrict CORS origins; document interim model | `server.py` |
 
-### Long-term (months)
+### Remaining — Medium-term (weeks)
 
 | Item | What | Files |
 |---|---|---|
-| P1 complete | Eliminate `JamaCache` entirely; all reads go through `CacheManager` | All MCP tools, `cache.py` |
+| P2 | Extract inline REST routes from `server.py` into `api/` routers | `server.py`, `api/*.py` |
 | P4 | Refactor `cache_server.py` + `generate_caches.py` into classes | `server/` |
 | P8 | Migrate extension panels to external HTML/CSS resources | `src/panels/`, `src/editor/` |
+
+### Remaining — Long-term (months)
+
+| Item | What | Files |
+|---|---|---|
 | P11 | Refactor + test `post_install.py` | `post_install.py` |
+| — | Deprecate `JamaCache` entirely; repurpose as proper edit-action log with schema | `cache.py` |
 
 ---
 
