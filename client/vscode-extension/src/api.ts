@@ -62,45 +62,76 @@ export class ApiClient {
    *   active_project_changed  — { project_id, project_name }
    *   sync_started/progress/complete/error — sync lifecycle
    *   item_updated            — { item_id, document_key }
+   *
+   * Implementation note: VS Code extensions run in Node.js — the browser's
+   * EventSource API is not available.  We use Node.js http/https directly
+   * and parse the SSE wire format (event:/data: lines, \n\n blocks) manually.
    */
   subscribeEvents(onEvent: (type: string, data: unknown) => void): () => void {
-    const url = `${this.baseUrl}/api/events`;
-    let es: EventSource | null = null;
+    const urlStr = `${this.baseUrl}/api/events`;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nodeHttp = urlStr.startsWith("https") ? require("https") : require("http");
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let req: any = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
 
     const connect = () => {
       if (stopped) { return; }
-      es = new EventSource(url);
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        req = nodeHttp.get(urlStr, (res: any) => {
+          let buffer = "";
 
-      // Listen for all named event types
-      const eventTypes = [
-        "connected",
-        "active_project_changed",
-        "sync_started",
-        "sync_progress",
-        "sync_complete",
-        "sync_error",
-        "item_updated",
-      ];
-      for (const et of eventTypes) {
-        es.addEventListener(et, (ev: MessageEvent) => {
-          try {
-            onEvent(et, JSON.parse(ev.data));
-          } catch {
-            onEvent(et, ev.data);
-          }
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            buffer += chunk;
+            // SSE events are delimited by a blank line (\n\n).
+            // Split on double newline and keep the trailing incomplete block.
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+
+            for (const block of blocks) {
+              let eventType = "";
+              let dataStr = "";
+              for (const line of block.split("\n")) {
+                if (line.startsWith("event:")) {
+                  eventType = line.slice(6).trim();
+                } else if (line.startsWith("data:")) {
+                  dataStr = line.slice(5).trim();
+                }
+                // lines starting with ':' are comments/keepalive — skip
+              }
+              if (eventType || dataStr) {
+                try {
+                  onEvent(eventType || "message", dataStr ? JSON.parse(dataStr) : {});
+                } catch {
+                  onEvent(eventType || "message", dataStr);
+                }
+              }
+            }
+          });
+
+          res.on("end", () => {
+            req = null;
+            if (!stopped) { reconnectTimer = setTimeout(connect, 5000); }
+          });
+
+          res.on("error", () => {
+            req = null;
+            if (!stopped) { reconnectTimer = setTimeout(connect, 5000); }
+          });
         });
-      }
 
-      es.onerror = () => {
-        es?.close();
-        es = null;
-        if (!stopped) {
-          // Reconnect after 5s
-          reconnectTimer = setTimeout(connect, 5000);
-        }
-      };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        req.on("error", (_err: any) => {
+          req = null;
+          if (!stopped) { reconnectTimer = setTimeout(connect, 5000); }
+        });
+      } catch {
+        if (!stopped) { reconnectTimer = setTimeout(connect, 5000); }
+      }
     };
 
     connect();
@@ -108,7 +139,8 @@ export class ApiClient {
     return () => {
       stopped = true;
       if (reconnectTimer !== null) { clearTimeout(reconnectTimer); }
-      es?.close();
+      req?.destroy();
+      req = null;
     };
   }
 
