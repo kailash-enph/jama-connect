@@ -341,23 +341,60 @@ async def jama_incremental_sync(ctx: Context, project_id: int) -> dict:
     return result.model_dump(mode="json")
 
 
+# ---------- MCP Tools: Active Project ----------
+
+@mcp.tool()
+async def jama_set_active_project(ctx: Context, project_id: int) -> dict:
+    """Set the active project for all subsequent reads and searches.
+
+    All MCP tools (jama_search, jama_get_item, jama_get_item_tree, etc.) and
+    the VS Code extension tree operate on the active project only.
+
+    The project must have been synced or downloaded first — call
+    jama_sync_project(project_id) if needed.
+
+    Args:
+        project_id: Jama project ID to activate.
+    """
+    from .settings_api import _settings, _save_settings
+    _settings.active_project_id = project_id
+    _save_settings(_settings)
+    await services.set_active_project(project_id)
+    has_db = services.cache_manager is not None and await services.cache_manager.has_project_db(project_id)
+    return {
+        "status": "ok",
+        "active_project_id": project_id,
+        "has_local_db": has_db,
+        "message": (
+            f"Active project set to {project_id}. Local DB ready."
+            if has_db
+            else f"Active project set to {project_id}. No local DB — run jama_sync_project({project_id}) first."
+        ),
+    }
+
+
 # ---------- MCP Tools: Search ----------
 
 @mcp.tool()
-async def jama_search(ctx: Context, query: str, project_id: int | None = None, limit: int = 20) -> list[dict]:
-    """Full-text search over cached items.
+async def jama_search(ctx: Context, query: str, limit: int = 20) -> list[dict]:
+    """Full-text search over the active project's items, test plans, cycles, and runs.
+
+    Search is always scoped to the active project (set via jama_set_active_project
+    or via the VS Code extension Settings panel).
 
     Supports: document keys (SET-43, CMP-12), item IDs, natural language,
     FTS5 operators (AND, OR, NOT, "phrase", prefix*).
     Searches name, description, document_key, and all custom fields.
     Returns lightweight results for quick lookups.
 
-    Use jama_deep_search for holistic results with upstream/downstream
-    relationship context, parent info, and parsed custom fields.
+    Use jama_deep_search for results with upstream/downstream relationship context.
+
+    Args:
+        query: Search text, document key (SET-43), or item ID (5624955).
+        limit: Max results (default 20).
     """
     _need(search_engine, "search_engine")
-    # Use unified search to also find test runs, plans, cycles
-    results = await search_engine.unified_search(query, project_id=project_id, limit=limit)
+    results = await search_engine.unified_search(query, limit=limit)
     return [r.model_dump(mode="json") for r in results]
 
 
@@ -365,12 +402,13 @@ async def jama_search(ctx: Context, query: str, project_id: int | None = None, l
 async def jama_deep_search(
     ctx: Context,
     query: str,
-    project_id: int | None = None,
     limit: int = 10,
     include_relations: bool = True,
-    max_relation_depth: int = 1,
 ) -> list[dict]:
     """Holistic search returning items with full traceability context.
+
+    Search is always scoped to the active project (set via jama_set_active_project
+    or via the VS Code extension Settings panel).
 
     For each matched item, returns:
       - item details (name, description, document_key, version, custom fields)
@@ -383,25 +421,13 @@ async def jama_deep_search(
     include test_cycle_name, test_plan_name, test_case_id, execution_date,
     and status (PASSED/FAILED/NOT_RUN etc.).
 
-    Use this when you need the full picture of an item's traceability and
-    relationships. Searches name, description, document_key, and all custom
-    fields in the cache.
-
     Args:
         query: Search text, document key (SET-43), or item ID (5624955).
-        project_id: Limit to a specific project. None = all projects.
         limit: Max results (default 10).
         include_relations: Include upstream/downstream relationships (default True).
-        max_relation_depth: 1 = direct relations only, 2 = include relations-of-relations.
     """
     _need(search_engine, "search_engine")
-
-    # Use unified deep search (covers items + test runs + plans + cycles)
-    # Relationship enrichment is handled inside SearchEngine using ProjectDb
-    unified_results = await search_engine.unified_deep_search(
-        query, project_id=project_id, limit=limit,
-    )
-
+    unified_results = await search_engine.unified_deep_search(query, limit=limit)
     return [r.model_dump(mode="json") for r in unified_results]
 
 
@@ -2031,29 +2057,29 @@ async def api_list_uncached_images():
 # ---------- REST: Search ----------
 
 @rest_app.get("/api/search")
-async def api_search(q: str = Query(...), project_id: int | None = None, limit: int = 50):
+async def api_search(q: str = Query(...), limit: int = 50):
+    """Unified search across items, test plans, cycles, and runs in the active project.
+
+    Search is always scoped to the active project's local DB.
+    Select a project via Settings before searching.
+    """
     _need(search_engine, "search_engine")
-    # Use unified search to cover items + test runs + plans + cycles
-    results = await search_engine.unified_search(q, project_id=project_id, limit=limit)
+    results = await search_engine.unified_search(q, limit=limit)
     return [r.model_dump(mode="json") for r in results]
 
 
 @rest_app.get("/api/search/deep")
 async def api_deep_search(
     q: str = Query(...),
-    project_id: int | None = None,
     limit: int = 20,
     include_relations: bool = True,
-    max_relation_depth: int = 1,
 ):
     """Holistic search with upstream/downstream relationship context.
-    Covers items, test runs, test plans, and test cycles."""
+
+    Covers items, test runs, test plans, and test cycles in the active project.
+    """
     _need(search_engine, "search_engine")
-    results = await search_engine.unified_deep_search(
-        q,
-        project_id=project_id,
-        limit=limit,
-    )
+    results = await search_engine.unified_deep_search(q, limit=limit)
     return [r.model_dump(mode="json") for r in results]
 
 

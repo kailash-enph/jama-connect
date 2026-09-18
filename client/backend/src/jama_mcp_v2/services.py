@@ -234,7 +234,7 @@ class ServiceRegistry:
         self.test_manager = TestManager(self.api_client, self.cache)
         self.writer = Writer(self.api_client, self.cache)
         self.exporter = Exporter(self.cache)
-        # SearchEngine starts with no active DB — set when project is selected
+        # SearchEngine starts with no active DB — loaded below from persisted settings
         self.search_engine = SearchEngine(None)
         self.attachment_mgr = AttachmentManager(self.api_client, self.cache, CACHE_DIR)
         self.progress_bus = ProgressBus()
@@ -244,9 +244,17 @@ class ServiceRegistry:
             import time
             self._start_time = time.time()
 
+        # Restore active project from persisted settings so SearchEngine and
+        # tree/item reads work immediately without the user re-selecting a project.
+        from .settings_api import _settings
+        if _settings.active_project_id:
+            await self.set_active_project(_settings.active_project_id)
+
         logger.info(
-            "MCP services initialized: API=%s, Cache=%s, CacheServer=%s",
-            JAMA_URL, self.cache.db_path, self.cache_server_url or "(none)",
+            "MCP services initialized: API=%s, Cache=%s, active_project=%s, CacheServer=%s",
+            JAMA_URL, self.cache.db_path,
+            _settings.active_project_id or "none",
+            self.cache_server_url or "(none)",
         )
 
     async def init_editor_services(self) -> None:
