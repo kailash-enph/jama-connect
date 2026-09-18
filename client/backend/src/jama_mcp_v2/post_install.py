@@ -1,19 +1,23 @@
-"""Post-install helper: repair installation, set up Devin MCP link, install VS Code extension.
+"""Post-install helper: stop daemon, repair installation, set up Devin MCP link,
+install VS Code/Devin extension, start backend.
 
 Usage:
-    jama-post-install                   # Full setup (repair + symlink + extension)
+    jama-post-install                   # Full setup (all steps)
     jama-post-install --check           # Check all steps, make no changes
-    jama-post-install --skip-extension  # Symlink only, skip VS Code install
+    jama-post-install --skip-extension  # Symlink only, skip extension install
     jama-post-install --repair-only     # Only clean up corrupted/stale dist-infos
+    jama-post-install --no-start        # Skip starting the backend at the end
 
 Run once after `pip install jama-connect`. Safe to run multiple times.
 
 Steps:
-  0. Repair    — remove corrupted ~ama-* entries and stale old dist-infos
-  1. Symlink   — create ~/.devin/mcp-servers/jama-connect -> site-packages parent
-  2. Extension — install bundled jama-editor.vsix to:
-                   a) Devin  (~/.devin/extensions/)  — direct zip extraction
-                   b) VS Code (~/.vscode/extensions/) — via `code --install-extension`
+  0. Stop     — gracefully stop any running jama-connect daemon (REST + MCP)
+  1. Repair   — remove corrupted ~ama-* entries and stale old dist-infos
+  2. Symlink  — create ~/.devin/mcp-servers/jama-connect -> site-packages parent
+  3. Patch    — overwrite out/ JS in all installed extension dirs (fast update)
+  4. Devin    — extract bundled .vsix to ~/.devin/extensions/
+  5. VS Code  — install bundled .vsix via `code --install-extension`
+  6. Start    — launch jama-rest daemon in the background
 
 Learnings captured:
   - pip --force-reinstall while daemon is running leaves ~ama-* corruption
@@ -211,6 +215,151 @@ def warn_if_daemon_running() -> None:
             "  Stop it before reinstalling the wheel to avoid file-locking issues:\n"
             "    Invoke-RestMethod -Uri http://localhost:8765/settings/server/stop -Method POST"
         )
+
+
+# ---------------------------------------------------------------------------
+# Step 0: Stop running daemon
+# ---------------------------------------------------------------------------
+
+def stop_daemon(port: int = 8765, timeout: int = 8) -> bool:
+    """Gracefully stop any running jama-connect daemon.
+
+    Strategy (tried in order):
+      1. POST /settings/server/stop  — clean shutdown via REST API
+      2. Kill any process whose command line contains 'jama_mcp_v2' or 'jama-rest'
+
+    Returns True if daemon was already stopped or was stopped successfully.
+    """
+    import time
+    import urllib.request
+
+    if not _daemon_is_running(port):
+        print("  Daemon not running — nothing to stop.")
+        return True
+
+    # --- 1. Graceful REST shutdown ---
+    print(f"  Sending shutdown request to http://127.0.0.1:{port}/settings/server/stop ...")
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/settings/server/stop",
+            method="POST",
+            data=b"",
+        )
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception:
+        pass  # server may close the connection before responding — that's fine
+
+    # Wait for it to die
+    for _ in range(timeout * 2):
+        time.sleep(0.5)
+        if not _daemon_is_running(port):
+            print("  Daemon stopped cleanly.")
+            return True
+
+    # --- 2. Force-kill via OS ---
+    print("  Graceful shutdown timed out — force-killing process ...")
+    killed = False
+    if sys.platform == "win32":
+        try:
+            # wmic finds processes by command line substring
+            result = subprocess.run(
+                ["wmic", "process", "where",
+                 "CommandLine like '%jama_mcp_v2%' or CommandLine like '%jama-rest%'",
+                 "call", "terminate"],
+                capture_output=True, text=True, timeout=10,
+            )
+            killed = "ReturnValue = 0" in result.stdout
+        except Exception as e:
+            print(f"  WARNING: wmic kill failed: {e}")
+    else:
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", "jama_mcp_v2|jama-rest"],
+                capture_output=True, timeout=5,
+            )
+            killed = result.returncode == 0
+        except Exception as e:
+            print(f"  WARNING: pkill failed: {e}")
+
+    # Final wait
+    import time as _time
+    for _ in range(6):
+        _time.sleep(0.5)
+        if not _daemon_is_running(port):
+            print("  Daemon killed." if killed else "  Daemon no longer responding.")
+            return True
+
+    print("  WARNING: Could not confirm daemon stopped — proceeding anyway.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Start backend daemon
+# ---------------------------------------------------------------------------
+
+def start_backend(port: int = 8765) -> bool:
+    """Launch jama-rest in the background (detached from this process).
+
+    On Windows: uses 'start /B' so the daemon keeps running after this
+    script exits. On POSIX: uses double-fork / nohup.
+
+    Returns True if the daemon started and is responding within ~5 seconds.
+    """
+    import time
+
+    # Find jama-rest binary
+    jama_rest = shutil.which("jama-rest")
+    if not jama_rest:
+        # Try .cmd wrapper (Windows PATH quirk)
+        jama_rest = shutil.which("jama-rest.cmd")
+    if not jama_rest:
+        # Absolute fallback: same Scripts/ dir as this Python interpreter
+        scripts_dir = Path(sys.executable).parent
+        for name in ("jama-rest", "jama-rest.cmd", "jama-rest.exe"):
+            candidate = scripts_dir / name
+            if candidate.exists():
+                jama_rest = str(candidate)
+                break
+
+    if not jama_rest:
+        print("  WARNING: jama-rest not found in PATH — cannot start backend.")
+        print("  Start manually: jama-rest")
+        return False
+
+    print(f"  Launching: {jama_rest} --port {port}")
+    try:
+        if sys.platform == "win32":
+            # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP: survives parent exit
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            subprocess.Popen(
+                [jama_rest, "--port", str(port)],
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                [jama_rest, "--port", str(port)],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception as e:
+        print(f"  WARNING: Could not start backend: {e}")
+        return False
+
+    # Wait up to 5 s for it to respond
+    for i in range(10):
+        time.sleep(0.5)
+        if _daemon_is_running(port):
+            print(f"  Backend started and responding on port {port}.")
+            return True
+
+    print(f"  Backend launched (may still be starting — check http://localhost:{port}/api/health)")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -598,53 +747,95 @@ def run_setup(
     check_only: bool = False,
     skip_extension: bool = False,
     repair_only: bool = False,
+    no_start: bool = False,
+    port: int = 8765,
 ) -> None:
-    """Run the full post-install setup."""
+    """Run the full post-install setup.
+
+    Steps (normal mode):
+      0. Stop daemon  — kill any running jama-connect process
+      1. Repair       — clean corrupted/stale dist-info entries
+      2. MCP symlink  — ~/.devin/mcp-servers/jama-connect
+      3. Patch JS     — overwrite out/ in all installed extension dirs
+      4. Devin ext    — extract vsix to ~/.devin/extensions/
+      5. VS Code ext  — code --install-extension
+      6. Start daemon — launch jama-rest in background
+    """
     pkg_version = importlib.metadata.version("jama-connect")
     print(f"=== jama-connect post-install setup (v{pkg_version}) ===")
 
+    # --- Step 0: Stop daemon ---
     if not check_only:
-        warn_if_daemon_running()
+        print("\n[0/6] Stop existing daemon")
+        stop_daemon(port=port)
+    else:
+        print("\n[0/6] Daemon status")
+        running = _daemon_is_running(port)
+        print(f"  {'[RUNNING]' if running else '[STOPPED]'} Backend on port {port}")
 
-    print("\n[0/3] Installation repair")
+    # --- Step 1: Repair ---
+    print("\n[1/6] Installation repair")
     repair_installation(check_only=check_only)
 
     if repair_only:
         print("\nRepair-only mode — done.")
         return
 
-    print("\n[1/4] Devin MCP symlink")
+    # --- Step 2: MCP symlink ---
+    print("\n[2/6] Devin MCP symlink")
     create_symlink(check_only=check_only)
 
+    # --- Steps 3-5: Extensions ---
     if not skip_extension:
-        print("\n[2/4] Patch extension JS (out/ hot-update -> all installed hosts)")
+        print("\n[3/6] Patch extension JS (fast update → all installed hosts)")
         patch_extension_out(check_only=check_only)
 
-        print("\n[3/4] Devin extension (full vsix extraction -> ~/.devin/extensions/)")
+        print("\n[4/6] Devin extension (vsix extraction → ~/.devin/extensions/)")
         install_devin_extension(check_only=check_only)
 
-        print("\n[4/4] VS Code extension (code --install-extension)")
+        print("\n[5/6] VS Code extension (code --install-extension)")
         install_vscode_extension(check_only=check_only)
     else:
-        print("\n[2/4] Extension patch — skipped (--skip-extension)")
-        print("\n[3/4] Devin extension — skipped (--skip-extension)")
-        print("\n[4/4] VS Code extension — skipped (--skip-extension)")
+        print("\n[3/6] Extension patch  — skipped (--skip-extension)")
+        print("\n[4/6] Devin extension  — skipped (--skip-extension)")
+        print("\n[5/6] VS Code extension — skipped (--skip-extension)")
+
+    # --- Step 6: Start daemon ---
+    if not check_only and not no_start:
+        print("\n[6/6] Start backend daemon")
+        start_backend(port=port)
+    elif check_only:
+        print("\n[6/6] Start daemon — skipped (check mode)")
+    else:
+        print("\n[6/6] Start daemon — skipped (--no-start)")
 
     if not check_only:
-        print("\nDone. Reload VS Code / Devin to activate the extension.")
+        print("\nDone. Reload VS Code / Devin window to activate the extension.")
     else:
         print("\nCheck complete.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="jama-connect post-install: repair env, create Devin MCP link, install VS Code extension"
+        description=(
+            "jama-connect post-install: stop daemon, repair env, create Devin MCP link, "
+            "install VS Code + Devin extension, start backend. "
+            "Called automatically by build-and-install.ps1 after pip install."
+        )
     )
     parser.add_argument("--check", action="store_true", help="Check all steps without making changes")
-    parser.add_argument("--skip-extension", action="store_true", help="Skip VS Code extension install")
+    parser.add_argument("--skip-extension", action="store_true", help="Skip extension install steps")
     parser.add_argument("--repair-only", action="store_true", help="Only clean up corrupted/stale dist-infos")
+    parser.add_argument("--no-start", action="store_true", help="Skip starting the backend at the end")
+    parser.add_argument("--port", type=int, default=8765, help="REST API port (default: 8765)")
     args = parser.parse_args()
-    run_setup(check_only=args.check, skip_extension=args.skip_extension, repair_only=args.repair_only)
+    run_setup(
+        check_only=args.check,
+        skip_extension=args.skip_extension,
+        repair_only=args.repair_only,
+        no_start=args.no_start,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":
