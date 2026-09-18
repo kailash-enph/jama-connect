@@ -44,14 +44,15 @@ export class TestRunnerTreeProvider
     const projectId = this.selector.selectedId;
     if (!projectId) {
       const item = new TestTreeItem(
-        "Select a project...",
+        "No active project",
         vscode.TreeItemCollapsibleState.None
       );
+      item.description = "Set one in Settings → Status";
       item.command = {
-        command: "jamaEditor.selectProject",
-        title: "Select Project",
+        command: "jamaEditor.openSettings",
+        title: "Open Settings",
       };
-      item.iconPath = new vscode.ThemeIcon("folder-opened");
+      item.iconPath = new vscode.ThemeIcon("info");
       return [item];
     }
 

@@ -64,8 +64,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       treeProvider?.refresh();
     }),
 
-    vscode.commands.registerCommand("jamaEditor.selectProject", async () => {
-      await projectSelector?.pickProject();
+    vscode.commands.registerCommand("jamaEditor.expandAll", async () => {
+      // VS Code has no built-in expandAll API — we reveal each root item with
+      // expand:3 (maximum depth the API supports) which recursively opens
+      // the item and up to 3 levels of its children.
+      try {
+        const roots = await treeProvider?.getChildren(undefined) ?? [];
+        for (const root of roots) {
+          await treeView.reveal(root, { expand: 3, select: false, focus: false });
+        }
+      } catch {
+        // Ignore — tree may not have loaded yet
+      }
+    }),
+
+    // selectProject — called by Settings panel; fires active_project_changed SSE
+    // which triggers setProjectById on all clients automatically
+    vscode.commands.registerCommand("jamaEditor.selectProject", async (id?: number, name?: string) => {
+      if (id !== undefined) {
+        // Called programmatically (e.g. from Settings panel with known id)
+        try {
+          await api.selectProject(id, name);
+          // SSE event will trigger setProjectById — no need to do it here
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`Failed to set active project: ${msg}`);
+        }
+      }
     }),
 
     vscode.commands.registerCommand("jamaEditor.refreshTestRunner", () => {
@@ -477,18 +502,54 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       DbManagementPanel.show(context.extensionUri);
     }),
 
-    // Set active project by ID — called by SettingsPanel to keep the tree in sync
+    // setActiveProjectById — legacy command kept for SettingsPanel backward compat
+    // The new path is: SettingsPanel calls POST /settings/project/select → SSE event → here
     vscode.commands.registerCommand(
       "jamaEditor.setActiveProjectById",
-      (projectId: number, projectName: string) => {
-        projectSelector?.setProjectById(
-          Number(projectId),
-          projectName || `Project ${projectId}`
-        );
-        testRunnerProvider?.refresh();
+      async (projectId: number, projectName: string) => {
+        try {
+          await api.selectProject(Number(projectId), projectName || `Project ${projectId}`);
+          // SSE active_project_changed will fire setProjectById automatically
+        } catch {
+          // Fallback: update local state directly if backend call fails
+          projectSelector?.setProjectById(Number(projectId), projectName || `Project ${projectId}`);
+          testRunnerProvider?.refresh();
+        }
       }
     )
   );
+
+  // ── SSE event subscription ──────────────────────────────────────────────────
+  // Subscribe to /api/events so any project change — from Settings panel,
+  // web viewer, MCP tool, or another client — immediately reloads both trees.
+  let stopSse: (() => void) | null = null;
+
+  const startSse = () => {
+    stopSse?.();
+    stopSse = api.subscribeEvents((type, data) => {
+      if (type === "active_project_changed") {
+        const d = data as { project_id: number; project_name: string };
+        if (d.project_id) {
+          projectSelector?.setProjectById(d.project_id, d.project_name ?? "");
+          testRunnerProvider?.refresh();
+        }
+      } else if (type === "sync_complete") {
+        // Auto-refresh trees when a sync finishes
+        treeProvider?.refresh();
+        testRunnerProvider?.refresh();
+      } else if (type === "item_updated") {
+        // Optionally refresh tree when a write-back completes
+        treeProvider?.refresh();
+      }
+    });
+    outputChannel.appendLine("SSE event stream connected.");
+  };
+
+  // Start SSE once the backend is ready, and clean up on deactivate
+  const _origDeactivate = deactivate;
+  context.subscriptions.push({
+    dispose: () => { stopSse?.(); },
+  });
 
   // Auto-start backend
   const config = vscode.workspace.getConfiguration("jamaEditor");
@@ -552,6 +613,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } catch {
         outputChannel.appendLine("Stale lock check skipped (editor backend may still be initializing).");
       }
+      // Start SSE subscription — keeps trees in sync with backend and other clients
+      startSse();
+
       // Offer to install as login service if not already set up
       backendManager.offerServiceInstall();
 

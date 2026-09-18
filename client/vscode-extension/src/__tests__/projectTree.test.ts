@@ -9,8 +9,8 @@
  *  2. Project switch fires onDidChange and clears cache.
  *  3. setProjectById updates selectedId, persists it, and fires onDidChange.
  *  4. Empty-cache hint item shown (not a silent blank tree).
- *  5. pickProject updates selector state and fires onDidChange.
- *  6. init() restores last project from workspaceState.
+ *  5. setProjectById is a no-op when called with the same id+name (dedup).
+ *  6. init() prefers backend active_project_id over workspaceState.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -29,10 +29,11 @@ function makeWorkspaceState(initial: Record<string, unknown> = {}) {
   };
 }
 
-function makeApi(treeNodes: JamaTreeNode[] = [], projects = []) {
+function makeApi(treeNodes: JamaTreeNode[] = [], projects: any[] = [], activeProjectId?: number) {
   return {
     getProjects: vi.fn(async () => projects),
     getItemTree: vi.fn(async (_id: number) => treeNodes),
+    getSettings: vi.fn(async () => ({ active_project_id: activeProjectId ?? null })),
   };
 }
 
@@ -95,7 +96,7 @@ describe("ProjectSelector", () => {
     expect(fired).toEqual([20570]);
   });
 
-  it("setProjectById(): fires onDidChange even when switching to same id", () => {
+  it("setProjectById(): is a no-op (no event) when called with same id+name", () => {
     const api = makeApi();
     const ctx = { workspaceState: makeWorkspaceState() } as any;
     const sel = new ProjectSelector(api as any, ctx);
@@ -104,36 +105,38 @@ describe("ProjectSelector", () => {
     const fired: number[] = [];
     sel.onDidChange((id) => fired.push(id as number));
 
+    // Same id+name → no-op, no event fired
     sel.setProjectById(20570, "Project A");
-    expect(fired).toHaveLength(1);
+    expect(fired).toHaveLength(0);
   });
 
-  it("pickProject(): updates selectedId and fires onDidChange on selection", async () => {
-    const project = { id: 20570, name: "IQ Battery R5", project_key: "IQ", is_folder: 0, parent_id: null, description: "", synced_at: 1 };
-    const api = makeApi([], [project]);
-
-    // showQuickPick mock — returns the first item
-    const vscode = await import("./mocks/vscode");
-    vi.mocked(vscode.window.showQuickPick).mockResolvedValueOnce({
-      label: project.name,
-      description: project.project_key,
-      detail: "synced",
-      projectId: project.id,
-    } as any);
-
-    const ws = makeWorkspaceState();
-    const ctx = { workspaceState: ws } as any;
+  it("setProjectById(): fires event when name changes even if id is same", () => {
+    const api = makeApi();
+    const ctx = { workspaceState: makeWorkspaceState() } as any;
     const sel = new ProjectSelector(api as any, ctx);
-    sel["_projects"] = [project as any];  // skip init() fetch
 
-    const fired: Array<number | undefined> = [];
-    sel.onDidChange((id) => fired.push(id));
+    sel.setProjectById(20570, "Old Name");
+    const fired: string[] = [];
+    sel.onDidChange(() => fired.push(sel.selectedName));
 
-    await sel.pickProject();
+    sel.setProjectById(20570, "New Name");
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toBe("New Name");
+  });
 
-    expect(sel.selectedId).toBe(20570);
-    expect(fired).toContain(20570);
-    expect(ws.update).toHaveBeenCalledWith("jamaEditor.lastProjectId", 20570);
+  it("init(): prefers backend active_project_id over workspaceState", async () => {
+    const p1 = { id: 20570, name: "Project A", project_key: "A", is_folder: 0, parent_id: null, description: "", synced_at: 1 };
+    const p2 = { id: 99999, name: "Project B", project_key: "B", is_folder: 0, parent_id: null, description: "", synced_at: 1 };
+    // Backend says active = 99999; workspaceState says 20570
+    const api = makeApi([], [p1, p2], 99999);
+    const ctx = { workspaceState: makeWorkspaceState({ "jamaEditor.lastProjectId": 20570 }) } as any;
+    const sel = new ProjectSelector(api as any, ctx);
+
+    await sel.init();
+
+    // Backend wins
+    expect(sel.selectedId).toBe(99999);
+    expect(sel.selectedName).toBe("Project B");
   });
 });
 
@@ -211,7 +214,7 @@ describe("ProjectTreeProvider", () => {
     const items = await provider.getChildren(undefined);
 
     expect(items).toHaveLength(1);
-    expect((items[0] as JamaTreeItem).label).toContain("No items cached");
+    expect((items[0] as JamaTreeItem).label).toContain("no items cached");
     expect((items[0] as JamaTreeItem).command?.command).toBe("jamaEditor.manageProjectDbs");
   });
 
@@ -225,11 +228,12 @@ describe("ProjectTreeProvider", () => {
 
   // ── no project selected ──────────────────────────────────────────────────
 
-  it("shows 'Select a project...' item when no project selected", async () => {
+  it("shows 'No active project' hint when no project selected", async () => {
     const items = await provider.getChildren(undefined);
     expect(items).toHaveLength(1);
-    expect((items[0] as JamaTreeItem).label).toBe("Select a project...");
-    expect((items[0] as JamaTreeItem).command?.command).toBe("jamaEditor.selectProject");
+    expect((items[0] as JamaTreeItem).label).toBe("No active project");
+    // Directs user to Settings panel, not project picker
+    expect((items[0] as JamaTreeItem).command?.command).toBe("jamaEditor.openSettings");
   });
 
   // ── normal tree rendering ────────────────────────────────────────────────

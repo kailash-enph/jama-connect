@@ -201,24 +201,33 @@ async def list_projects():
 
 @settings_router.post("/project/select")
 async def select_project(request: Request):
-    """Set active project and optionally trigger sync."""
+    """Set active project — notifies ALL connected clients via SSE immediately."""
     global _settings
     body = await request.json()
     pid = body.get("project_id")
     if not pid:
         return JSONResponse(status_code=400, content={"error": "project_id is required"})
+
+    pname = body.get("project_name", "")
     _settings.active_project_id = pid
-    _settings.active_project_name = body.get("project_name", "")
+    _settings.active_project_name = pname
     _save_settings(_settings)
 
-    # Open the ProjectDb and update SearchEngine for the new active project
+    # Open ProjectDb + update SearchEngine
     asyncio.create_task(services.set_active_project(pid))
+
+    # Push active_project_changed to ALL SSE subscribers immediately
+    from .events import event_bus
+    await event_bus.push("active_project_changed", {
+        "project_id": pid,
+        "project_name": pname,
+    })
 
     # Optionally trigger sync
     if body.get("sync", False) and services.sync_engine:
         asyncio.create_task(services.sync_engine.sync_project(pid))
-        return {"status": "selected_and_syncing", "project_id": pid}
-    return {"status": "selected", "project_id": pid}
+        return {"status": "selected_and_syncing", "project_id": pid, "project_name": pname}
+    return {"status": "selected", "project_id": pid, "project_name": pname}
 
 
 # ============================================================

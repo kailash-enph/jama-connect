@@ -4,8 +4,14 @@ import { ApiClient, JamaProject, JamaTreeNode } from "../api";
 const LAST_PROJECT_KEY = "jamaEditor.lastProjectId";
 
 /**
- * Shared project selection state.
- * Both tree providers (items + test runner) react to changes.
+ * Shared project selection state — always mirrors the backend's active project.
+ *
+ * Single source of truth: POST /settings/project/select on the backend.
+ * The backend fires an SSE active_project_changed event that all clients
+ * (VS Code extension, web viewer, MCP) subscribe to and react to.
+ *
+ * Project selection UI lives ONLY in the Settings panel.
+ * The tree views display the active project name as a read-only label.
  */
 export class ProjectSelector {
   private _onDidChange = new vscode.EventEmitter<number | undefined>();
@@ -30,13 +36,30 @@ export class ProjectSelector {
     return this._projects;
   }
 
-  /** Load project list and restore last selection. */
+  /** Load project list and restore active project from backend settings. */
   async init(): Promise<void> {
     try {
       this._projects = await this.api.getProjects();
     } catch {
       this._projects = [];
     }
+
+    // Prefer backend's persisted active_project_id over local workspaceState
+    try {
+      const settings = await this.api.getSettings();
+      const backendId = settings?.active_project_id;
+      if (backendId && this._projects.some((p) => p.id === backendId)) {
+        this._selectedId = backendId;
+        this._selectedName =
+          this._projects.find((p) => p.id === backendId)?.name ?? "";
+        await this.ctx.workspaceState.update(LAST_PROJECT_KEY, backendId);
+        this._onDidChange.fire(this._selectedId);
+        return;
+      }
+    } catch {
+      /* fall through to local state */
+    }
+
     const lastId = this.ctx.workspaceState.get<number>(LAST_PROJECT_KEY);
     if (lastId && this._projects.some((p) => p.id === lastId)) {
       this._selectedId = lastId;
@@ -46,43 +69,15 @@ export class ProjectSelector {
     this._onDidChange.fire(this._selectedId);
   }
 
-  /** Show QuickPick with all projects and set the selection. */
-  async pickProject(): Promise<void> {
-    if (this._projects.length === 0) {
-      try {
-        this._projects = await this.api.getProjects();
-      } catch {
-        vscode.window.showErrorMessage("Failed to load projects.");
-        return;
-      }
-    }
-
-    const items = this._projects
-      .filter((p) => !p.is_folder)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((p) => ({
-        label: p.name,
-        description: p.project_key,
-        detail: p.synced_at > 0 ? "synced" : "not synced",
-        projectId: p.id,
-      }));
-
-    const selected = await vscode.window.showQuickPick(items, {
-      placeHolder: "Select a Jama project",
-      matchOnDescription: true,
-    });
-    if (!selected) {
-      return;
-    }
-
-    this._selectedId = selected.projectId;
-    this._selectedName = selected.label;
-    await this.ctx.workspaceState.update(LAST_PROJECT_KEY, this._selectedId);
-    this._onDidChange.fire(this._selectedId);
-  }
-
-  /** Programmatically set the active project (e.g. from Settings panel). */
+  /**
+   * Called by SSE listener (extension.ts) when backend fires
+   * active_project_changed.  Updates local state and fires onDidChange
+   * so both tree views reload immediately.
+   */
   setProjectById(id: number, name: string): void {
+    if (this._selectedId === id && this._selectedName === name) {
+      return; // no-op — already correct
+    }
     this._selectedId = id;
     this._selectedName = name;
     this.ctx.workspaceState.update(LAST_PROJECT_KEY, id);
@@ -101,7 +96,10 @@ export class ProjectSelector {
 
 /**
  * VS Code TreeDataProvider for Jama items.
- * Shows the selected project's item tree (no project-level nodes).
+ *
+ * Shows the active project's item tree (from ProjectDb via REST).
+ * The tree title bar has Refresh + Sync buttons; project selection is
+ * in the Settings panel only.
  */
 export class ProjectTreeProvider
   implements vscode.TreeDataProvider<JamaTreeItem>
@@ -113,9 +111,9 @@ export class ProjectTreeProvider
 
   private api: ApiClient;
   private selector: ProjectSelector;
-  // null  = not yet fetched for this project (fetch on next getChildren call)
-  // []    = fetched but project has no cached items (show "not synced" hint)
-  // [...] = fetched items
+  // null  = not yet fetched for this project
+  // []    = fetched but no cached items (show "sync to load" hint)
+  // [...] = items loaded
   private treeCache: JamaTreeNode[] | null = null;
 
   constructor(api: ApiClient, selector: ProjectSelector) {
@@ -141,21 +139,21 @@ export class ProjectTreeProvider
   async getChildren(element?: JamaTreeItem): Promise<JamaTreeItem[]> {
     const projectId = this.selector.selectedId;
     if (!projectId) {
-      // No project selected — show a prompt item
+      // No active project — prompt user to set one in Settings
       const item = new JamaTreeItem(
-        "Select a project...",
+        "No active project",
         vscode.TreeItemCollapsibleState.None
       );
+      item.description = "Set one in Settings → Status";
       item.command = {
-        command: "jamaEditor.selectProject",
-        title: "Select Project",
+        command: "jamaEditor.openSettings",
+        title: "Open Settings",
       };
-      item.iconPath = new vscode.ThemeIcon("folder-opened");
+      item.iconPath = new vscode.ThemeIcon("info");
       return [item];
     }
 
     if (!element) {
-      // Root: load project item tree
       return this.getProjectItems(projectId);
     }
 
@@ -171,21 +169,17 @@ export class ProjectTreeProvider
 
   // ---------- Private ----------
 
-  private async getProjectItems(
-    projectId: number
-  ): Promise<JamaTreeItem[]> {
+  private async getProjectItems(projectId: number): Promise<JamaTreeItem[]> {
     try {
-      // null means we haven't fetched yet for this project
       if (this.treeCache === null) {
         this.treeCache = await this.api.getItemTree(projectId);
       }
-      // Empty array means the project exists but has no cached items
       if (this.treeCache.length === 0) {
         const hint = new JamaTreeItem(
-          "No items cached for this project",
+          `${this.selector.selectedName || "Project"} — no items cached`,
           vscode.TreeItemCollapsibleState.None
         );
-        hint.description = "Open DB Manager to download or sync";
+        hint.description = "Use Sync button or DB Manager to load";
         hint.iconPath = new vscode.ThemeIcon("cloud-download");
         hint.command = {
           command: "jamaEditor.manageProjectDbs",
@@ -193,9 +187,7 @@ export class ProjectTreeProvider
         };
         return [hint];
       }
-      return this.treeCache.map((node) =>
-        this.nodeToTreeItem(node, projectId)
-      );
+      return this.treeCache.map((node) => this.nodeToTreeItem(node, projectId));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showErrorMessage(`Failed to load project tree: ${msg}`);
@@ -203,17 +195,12 @@ export class ProjectTreeProvider
     }
   }
 
-  private getItemChildren(
-    projectId: number,
-    parentId: number
-  ): JamaTreeItem[] {
+  private getItemChildren(projectId: number, parentId: number): JamaTreeItem[] {
     const parent = this.findNode(this.treeCache ?? [], parentId);
     if (!parent || !parent.children) {
       return [];
     }
-    return parent.children.map((node) =>
-      this.nodeToTreeItem(node, projectId)
-    );
+    return parent.children.map((node) => this.nodeToTreeItem(node, projectId));
   }
 
   private findNode(
@@ -234,10 +221,7 @@ export class ProjectTreeProvider
     return undefined;
   }
 
-  private nodeToTreeItem(
-    node: JamaTreeNode,
-    projectId: number
-  ): JamaTreeItem {
+  private nodeToTreeItem(node: JamaTreeNode, projectId: number): JamaTreeItem {
     const hasChildren =
       node.has_children && node.children && node.children.length > 0;
     const collapsible = hasChildren
@@ -253,7 +237,6 @@ export class ProjectTreeProvider
     item.contextValue = hasChildren ? "jamaFolder" : "jamaItem";
     item.iconPath = this.getItemIcon(node.item_type_display);
 
-    // Double-click opens the item in the custom editor
     item.command = {
       command: "jamaEditor.openItem",
       title: "Open Item",

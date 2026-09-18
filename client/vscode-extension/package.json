@@ -2,7 +2,7 @@
   "name": "jama-editor",
   "displayName": "Jama Editor",
   "description": "Edit Jama Connect items directly in VS Code with rich-text editing, workflow transitions, and full traceability.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "enphase",
   "icon": "media/jama-icon.png",
   "repository": {
@@ -50,6 +50,12 @@
         "command": "jamaEditor.refreshTree",
         "title": "Refresh",
         "icon": "$(refresh)",
+        "category": "Jama"
+      },
+      {
+        "command": "jamaEditor.expandAll",
+        "title": "Expand All",
+        "icon": "$(expand-all)",
         "category": "Jama"
       },
       {
@@ -142,29 +148,39 @@
     "menus": {
       "view/title": [
         {
-          "command": "jamaEditor.selectProject",
+          "command": "jamaEditor.refreshTree",
           "when": "view == jamaProjects",
           "group": "navigation@1"
         },
         {
-          "command": "jamaEditor.refreshTree",
+          "command": "jamaEditor.expandAll",
           "when": "view == jamaProjects",
           "group": "navigation@2"
         },
         {
-          "command": "jamaEditor.searchItems",
+          "command": "jamaEditor.syncProject",
           "when": "view == jamaProjects",
           "group": "navigation@3"
         },
         {
-          "command": "jamaEditor.selectProject",
-          "when": "view == jamaTestRunner",
-          "group": "navigation@1"
+          "command": "jamaEditor.searchItems",
+          "when": "view == jamaProjects",
+          "group": "navigation@4"
         },
         {
           "command": "jamaEditor.refreshTestRunner",
           "when": "view == jamaTestRunner",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jamaEditor.expandAll",
+          "when": "view == jamaTestRunner",
           "group": "navigation@2"
+        },
+        {
+          "command": "jamaEditor.syncProject",
+          "when": "view == jamaTestRunner",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [

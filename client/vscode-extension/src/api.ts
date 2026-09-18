@@ -43,6 +43,75 @@ export class ApiClient {
     return this.request("/settings/credentials");
   }
 
+  async getSettings(): Promise<{ active_project_id?: number; active_project_name?: string; [key: string]: unknown }> {
+    return this.request("/settings");
+  }
+
+  async selectProject(projectId: number, projectName?: string): Promise<{ status: string; project_id: number; project_name: string }> {
+    return this.request("/settings/project/select", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, project_name: projectName ?? "" }),
+    });
+  }
+
+  /**
+   * Subscribe to the backend SSE event stream (/api/events).
+   * Returns a cleanup function — call it when the extension deactivates.
+   *
+   * onEvent is called for every named event:
+   *   active_project_changed  — { project_id, project_name }
+   *   sync_started/progress/complete/error — sync lifecycle
+   *   item_updated            — { item_id, document_key }
+   */
+  subscribeEvents(onEvent: (type: string, data: unknown) => void): () => void {
+    const url = `${this.baseUrl}/api/events`;
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+
+    const connect = () => {
+      if (stopped) { return; }
+      es = new EventSource(url);
+
+      // Listen for all named event types
+      const eventTypes = [
+        "connected",
+        "active_project_changed",
+        "sync_started",
+        "sync_progress",
+        "sync_complete",
+        "sync_error",
+        "item_updated",
+      ];
+      for (const et of eventTypes) {
+        es.addEventListener(et, (ev: MessageEvent) => {
+          try {
+            onEvent(et, JSON.parse(ev.data));
+          } catch {
+            onEvent(et, ev.data);
+          }
+        });
+      }
+
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        if (!stopped) {
+          // Reconnect after 5s
+          reconnectTimer = setTimeout(connect, 5000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer !== null) { clearTimeout(reconnectTimer); }
+      es?.close();
+    };
+  }
+
   // ---------- Projects ----------
 
   async getProjects(): Promise<JamaProject[]> {

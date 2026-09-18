@@ -357,16 +357,36 @@ async def jama_set_active_project(ctx: Context, project_id: int) -> dict:
         project_id: Jama project ID to activate.
     """
     from .settings_api import _settings, _save_settings
+    from .events import event_bus
+
+    # Resolve project name from API or cache if available
+    pname = ""
+    try:
+        if services.api_client:
+            proj = await services.api_client.get_project(project_id)
+            pname = proj.get("fields", {}).get("name", "")
+    except Exception:
+        pass
+
     _settings.active_project_id = project_id
+    _settings.active_project_name = pname
     _save_settings(_settings)
     await services.set_active_project(project_id)
+
+    # Push to all connected SSE clients (VS Code, web viewer, etc.)
+    await event_bus.push("active_project_changed", {
+        "project_id": project_id,
+        "project_name": pname,
+    })
+
     has_db = services.cache_manager is not None and await services.cache_manager.has_project_db(project_id)
     return {
         "status": "ok",
         "active_project_id": project_id,
+        "project_name": pname,
         "has_local_db": has_db,
         "message": (
-            f"Active project set to {project_id}. Local DB ready."
+            f"Active project set to {project_id} ({pname}). Local DB ready."
             if has_db
             else f"Active project set to {project_id}. No local DB — run jama_sync_project({project_id}) first."
         ),
@@ -1550,7 +1570,7 @@ async def fastapi_lifespan(app: FastAPI):
 
 rest_app = FastAPI(
     title="Jama Unified Backend",
-    version="0.5.0",
+    version="0.5.5",
     lifespan=fastapi_lifespan,
 )
 rest_app.add_middleware(
@@ -1569,6 +1589,32 @@ from .api.db_mgmt import router as db_mgmt_router
 from .api.cache_server_routes import router as cache_server_router
 rest_app.include_router(db_mgmt_router)
 rest_app.include_router(cache_server_router)
+
+# ---------- SSE Events endpoint ----------
+
+from .events import event_bus
+
+@rest_app.get("/api/events")
+async def sse_events():
+    """Server-Sent Events stream.
+
+    All connected clients (VS Code extension, web viewer, Devin) subscribe here
+    and receive real-time push notifications:
+
+      event: connected             — handshake on connect
+      event: active_project_changed — {project_id, project_name}
+      event: sync_started          — {project_id, project_name}
+      event: sync_progress         — {project_id, percent, message}
+      event: sync_complete         — {project_id, project_name, items}
+      event: sync_error            — {project_id, message}
+      event: item_updated          — {item_id, document_key}
+      : keepalive                  — every 30s (comment line, no event type)
+    """
+    return StreamingResponse(
+        event_bus.stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 # Mount editor sub-app at /editor/
 try:
@@ -2870,29 +2916,37 @@ def _auto_install_extension() -> None:
 
 
 def _start_daemon(port: int = REST_PORT) -> None:
-    """Run MCP stdio server + REST API in the same asyncio event loop."""
+    """Run REST API (primary, main thread) + MCP stdio (background thread).
+
+    REST stays alive for the full process lifetime — it does NOT die when
+    Windsurf/Devin disconnects from the MCP stdio session.  The MCP thread
+    exits and restarts on reconnect; the REST server (and therefore the web
+    viewer and VS Code extension) are unaffected.
+    """
     import threading
     import uvicorn
 
     # Auto-install VS Code extension in background (non-blocking, once per version)
     _auto_install_extension()
 
-    # Start REST API in a background thread
+    # Start MCP stdio in a daemon background thread.
+    # When Windsurf disconnects, this thread exits; REST keeps running.
+    def _run_mcp():
+        logger.info("MCP stdio thread started")
+        try:
+            mcp.run(transport="stdio")
+        except Exception as exc:
+            logger.warning("MCP stdio exited: %s", exc)
+        logger.info("MCP stdio thread stopped (REST API continues)")
+
+    mcp_thread = threading.Thread(target=_run_mcp, daemon=True, name="jama-mcp-stdio")
+    mcp_thread.start()
+    logger.info("MCP stdio thread started (background)")
+
+    # Run REST API in the main thread — this blocks until the process is killed
+    logger.info("REST API starting on port %d (main thread)...", port)
     config = uvicorn.Config(rest_app, host="127.0.0.1", port=port, log_level="info")
-    rest_server = uvicorn.Server(config)
-
-    rest_thread = threading.Thread(target=rest_server.run, daemon=True, name="jama-rest")
-    rest_thread.start()
-    logger.info("REST API thread started on port %d", port)
-
-    # Run MCP in the main thread (stdio blocks until client disconnects)
-    try:
-        mcp.run(transport="stdio")
-    finally:
-        logger.info("MCP server exited, shutting down REST API...")
-        rest_server.should_exit = True
-        rest_thread.join(timeout=5)
-        logger.info("Daemon shutdown complete")
+    uvicorn.Server(config).run()
 
 
 def run_rest():
