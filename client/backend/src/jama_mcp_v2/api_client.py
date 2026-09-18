@@ -57,14 +57,20 @@ class JamaApiClient:
     # ---------- Lifecycle ----------
 
     async def open(self) -> None:
-        """Create the underlying httpx client and acquire an initial token."""
+        """Create the underlying httpx client.
+
+        Token is fetched lazily on the first API call via _ensure_token().
+        This avoids blocking the MCP server startup with a network round-trip
+        to the Jama OAuth endpoint — the MCP process is ready to list tools
+        immediately, and credentials are validated on first actual use.
+        """
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=httpx.Timeout(self._timeout, connect=15.0),
             follow_redirects=True,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
-        await self._refresh_token()
+        # Token fetched lazily — do NOT call _refresh_token() here.
 
     async def close(self) -> None:
         if self._http:

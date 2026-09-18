@@ -2876,12 +2876,22 @@ def main():
         sys.exit(1)
 
     if args.daemon:
-        # Check if a healthy backend already exists → exit gracefully
         if _check_existing_backend(args.port):
-            sys.exit(0)
-        logger.info("Starting Jama Connect (daemon mode): MCP + REST on port %d ...", args.port)
-        _setup_service_logging()
-        _start_daemon(args.port)
+            # REST backend already running (e.g. jama-rest.exe is up).
+            # Don't start another REST server — just run MCP stdio so Devin/Windsurf
+            # can use the MCP tools while the existing REST backend serves the
+            # VS Code extension and web viewer.
+            # Services are lazily initialized on first tool call (no web round-trip
+            # at startup) so MCP tool listing is immediate.
+            logger.info(
+                "REST backend already healthy on port %d — running MCP stdio only.",
+                args.port,
+            )
+            mcp.run(transport="stdio")
+        else:
+            logger.info("Starting Jama Connect (daemon mode): MCP + REST on port %d ...", args.port)
+            _setup_service_logging()
+            _start_daemon(args.port)
     else:
         logger.info("Starting Jama MCP v2 server (stdio)...")
         mcp.run(transport="stdio")
