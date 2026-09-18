@@ -65,17 +65,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
 
     vscode.commands.registerCommand("jamaEditor.expandAll", async () => {
-      // VS Code has no built-in expandAll API — we reveal each root item with
-      // expand:3 (maximum depth the API supports) which recursively opens
-      // the item and up to 3 levels of its children.
-      try {
-        const roots = await treeProvider?.getChildren(undefined) ?? [];
-        for (const root of roots) {
-          await treeView.reveal(root, { expand: 3, select: false, focus: false });
-        }
-      } catch {
-        // Ignore — tree may not have loaded yet
-      }
+      // VS Code focuses the tree view before firing a view/title button command,
+      // so list.expandAll always targets the correct (focused) tree — whether
+      // this was invoked from the Projects tree or the Test Runner tree.
+      // This is more reliable than treeView.reveal(item, { expand: N }) because:
+      //   1. reveal() requires reference-equal items from the internal tree state
+      //      (our providers create new objects per call — so items are never found)
+      //   2. expand:3 silently caps at 3 levels with no error
+      //   3. list.expandAll recursively expands all nodes with no depth limit
+      await vscode.commands.executeCommand("list.expandAll");
     }),
 
     // selectProject — called by Settings panel; fires active_project_changed SSE
