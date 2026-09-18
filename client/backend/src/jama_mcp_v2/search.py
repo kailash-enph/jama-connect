@@ -1,9 +1,10 @@
-"""Full-text search over cached items using SQLite FTS5.
+"""Full-text search over the active project's ProjectDb (unified FTS5).
 
-Provides:
-  - Fast-path exact lookups (item ID, document_key like SET-43 / CMP-12)
-  - FTS5 full-text with smart prefix expansion
-  - Holistic deep search with upstream/downstream relationship traversal
+Architecture: search is scoped to the active project only.
+The active ProjectDb is passed in at construction time (or swapped via
+SearchEngine.set_db() when the user switches projects).
+
+JamaCache is NOT used here — ProjectDb is the single source of truth.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import logging
 import re
 from typing import Any
 
-from .cache import JamaCache
+from .db.project_db import ProjectDb
 from .models import SearchResult, UnifiedSearchResult
 
 logger = logging.getLogger(__name__)
@@ -25,10 +26,25 @@ _ITEM_ID_RE = re.compile(r"^\d{5,}$")                            # bare numeric 
 
 
 class SearchEngine:
-    """Wraps the cache's FTS5 search with result formatting and relationship context."""
+    """Wraps the active project's ProjectDb FTS5 with result formatting and context.
 
-    def __init__(self, cache: JamaCache):
-        self._cache = cache
+    Use set_db() to swap the active DB when the user changes projects.
+    """
+
+    def __init__(self, db: ProjectDb | None = None):
+        self._db: ProjectDb | None = db
+
+    def set_db(self, db: ProjectDb | None) -> None:
+        """Update the active ProjectDb (called on project switch)."""
+        self._db = db
+
+    @property
+    def _active_db(self) -> ProjectDb:
+        if self._db is None:
+            raise RuntimeError(
+                "No active project DB — download or sync a project first."
+            )
+        return self._db
 
     # ------------------------------------------------------------------
     # Standard search (lightweight, for viewer/MCP basic calls)
@@ -37,10 +53,10 @@ class SearchEngine:
     async def search(
         self,
         query: str,
-        project_id: int | None = None,
+        project_id: int | None = None,  # kept for API compat; ignored (single-project)
         limit: int = 50,
     ) -> list[SearchResult]:
-        """Search cached items using FTS5 match syntax.
+        """Search active project using FTS5 match syntax.
 
         Supports standard FTS5 queries:
           - Simple: "battery monitor"
@@ -52,25 +68,25 @@ class SearchEngine:
         if not query or not query.strip():
             return []
 
+        db = self._active_db
         q = query.strip()
 
         # Fast-path: exact document_key match (SET-43, IQ_BATT_R5-DVT-7257, etc.)
         if _DOC_KEY_RE.match(q) or _FULL_DOC_KEY_RE.match(q):
-            item = await self._cache.get_item_by_document_key(q.upper())
+            item = await db.get_item_by_document_key(q.upper())
             if item:
                 return [self._row_to_result(item, rank=-100.0)]
             # Fall through to FTS if exact match fails (partial key)
 
         # Fast-path: bare numeric item ID
         if _ITEM_ID_RE.match(q):
-            item = await self._cache.get_item(int(q))
+            item = await db.get_item(int(q))
             if item:
                 return [self._row_to_result(item, rank=-100.0)]
 
         # FTS5 search
         sanitized = self._sanitize_query(q)
-        raw_results = await self._cache.search(sanitized, project_id=project_id, limit=limit)
-
+        raw_results = await db.search_items(sanitized, limit=limit)
         return [self._row_to_result(row, query=q) for row in raw_results]
 
     # ------------------------------------------------------------------
@@ -80,42 +96,33 @@ class SearchEngine:
     async def deep_search(
         self,
         query: str,
-        project_id: int | None = None,
+        project_id: int | None = None,  # kept for API compat; ignored
         limit: int = 20,
         include_relations: bool = True,
         max_relation_depth: int = 1,
     ) -> list[dict[str, Any]]:
-        """Holistic search returning items with upstream/downstream context.
-
-        For each matched item, also returns:
-          - upstream_items: items that trace TO this item (parents in traceability)
-          - downstream_items: items that this item traces TO (children in traceability)
-          - parent: parent item in tree hierarchy
-          - children_count: number of children in tree hierarchy
-          - fields: parsed custom fields (from fields_json)
-
-        This gives AI and users the full traceability picture in one call.
-        """
+        """Holistic search returning items with upstream/downstream context."""
         if not query or not query.strip():
             return []
 
+        db = self._active_db
         q = query.strip()
         matched_items: list[dict[str, Any]] = []
 
         # Fast-path: exact document_key or item ID
         if _DOC_KEY_RE.match(q) or _FULL_DOC_KEY_RE.match(q):
-            item = await self._cache.get_item_by_document_key(q.upper())
+            item = await db.get_item_by_document_key(q.upper())
             if item:
                 matched_items = [item]
         elif _ITEM_ID_RE.match(q):
-            item = await self._cache.get_item(int(q))
+            item = await db.get_item(int(q))
             if item:
                 matched_items = [item]
 
         # FTS fallback
         if not matched_items:
             sanitized = self._sanitize_query(q)
-            matched_items = await self._cache.search(sanitized, project_id=project_id, limit=limit)
+            matched_items = await db.search_items(sanitized, limit=limit)
 
         # Enrich each result with relationships and context
         enriched: list[dict[str, Any]] = []
@@ -144,7 +151,7 @@ class SearchEngine:
             # Parent item context
             parent_id = row.get("parent_id")
             if parent_id:
-                parent = await self._cache.get_item(parent_id)
+                parent = await db.get_item(parent_id)
                 entry["parent"] = {
                     "item_id": parent_id,
                     "document_key": parent.get("document_key", "") if parent else "",
@@ -154,13 +161,13 @@ class SearchEngine:
                 entry["parent"] = None
 
             # Children count
-            children = await self._cache.get_item_children(item_id)
+            children = await db.get_item_children(item_id)
             entry["children_count"] = len(children)
 
             # Relationship traversal
             if include_relations:
-                upstream = await self._cache.get_item_upstream_relations(item_id)
-                downstream = await self._cache.get_item_downstream_relations(item_id)
+                upstream = await db.get_upstream_relations(item_id)
+                downstream = await db.get_downstream_relations(item_id)
 
                 entry["upstream_items"] = [
                     {
@@ -186,7 +193,7 @@ class SearchEngine:
                 # Optionally go one more level deep for linked items
                 if max_relation_depth > 1:
                     for up in entry["upstream_items"]:
-                        up_up = await self._cache.get_item_upstream_relations(up["item_id"])
+                        up_up = await db.get_upstream_relations(up["item_id"])
                         up["upstream_items"] = [
                             {"item_id": r["from_item"],
                              "document_key": r.get("from_document_key", ""),
@@ -194,7 +201,7 @@ class SearchEngine:
                             for r in up_up
                         ]
                     for dn in entry["downstream_items"]:
-                        dn_dn = await self._cache.get_item_downstream_relations(dn["item_id"])
+                        dn_dn = await db.get_downstream_relations(dn["item_id"])
                         dn["downstream_items"] = [
                             {"item_id": r["to_item"],
                              "document_key": r.get("to_document_key", ""),
@@ -216,24 +223,21 @@ class SearchEngine:
     async def unified_search(
         self,
         query: str,
-        project_id: int | None = None,
+        project_id: int | None = None,  # kept for API compat; ignored
         doc_types: list[str] | None = None,
         limit: int = 50,
     ) -> list[UnifiedSearchResult]:
-        """Search across items, test plans, test cycles, and test runs.
-
-        Returns typed results with doc_type indicating what kind of entity matched.
-        Supports fast-path lookups for document keys and item IDs (items only).
-        """
+        """Search across items, test plans, test cycles, and test runs."""
         if not query or not query.strip():
             return []
 
+        db = self._active_db
         q = query.strip()
         results: list[UnifiedSearchResult] = []
 
         # Fast-path: exact document_key (items only)
         if _DOC_KEY_RE.match(q) or _FULL_DOC_KEY_RE.match(q):
-            item = await self._cache.get_item_by_document_key(q.upper())
+            item = await db.get_item_by_document_key(q.upper())
             if item:
                 return [UnifiedSearchResult(
                     entity_id=item["id"],
@@ -247,7 +251,7 @@ class SearchEngine:
 
         # Fast-path: bare numeric item ID
         if _ITEM_ID_RE.match(q):
-            item = await self._cache.get_item(int(q))
+            item = await db.get_item(int(q))
             if item:
                 return [UnifiedSearchResult(
                     entity_id=item["id"],
@@ -259,11 +263,8 @@ class SearchEngine:
                     rank=-100.0,
                 )]
 
-        # Unified FTS search
         sanitized = self._sanitize_query(q)
-        raw = await self._cache.unified_search(
-            sanitized, project_id=project_id, doc_types=doc_types, limit=limit,
-        )
+        raw = await db.unified_search(sanitized, doc_types=doc_types, limit=limit)
 
         for row in raw:
             desc = row.get("description", "")
@@ -283,34 +284,29 @@ class SearchEngine:
     async def unified_deep_search(
         self,
         query: str,
-        project_id: int | None = None,
+        project_id: int | None = None,  # kept for API compat; ignored
         doc_types: list[str] | None = None,
         limit: int = 20,
     ) -> list[UnifiedSearchResult]:
-        """Unified search with enriched context for each result.
-
-        For test_run results, adds test_cycle_name, test_plan_name, test_case_id, execution_date.
-        For item results, adds parent context and relationship counts.
-        """
+        """Unified search with enriched context for each result."""
         base_results = await self.unified_search(
-            query, project_id=project_id, doc_types=doc_types, limit=limit,
+            query, doc_types=doc_types, limit=limit,
         )
 
+        db = self._active_db
         enriched: list[UnifiedSearchResult] = []
         for r in base_results:
             entry = r.model_copy()
 
             if r.doc_type == "test_run":
-                # Enrich with test cycle/plan context
-                run = await self._cache.get_test_run(r.entity_id)
+                run = await db.get_test_run(r.entity_id)
                 if run:
                     entry.test_case_id = run.get("test_case_id")
                     entry.execution_date = run.get("execution_date")
                     cycle_id = run.get("test_cycle_id")
                     if cycle_id:
                         entry.test_cycle_id = cycle_id
-                        # Get cycle info
-                        cycles = await self._cache._db.execute_fetchall(
+                        cycles = await db._conn.execute_fetchall(
                             "SELECT name, test_plan_id FROM test_cycles WHERE id = ?",
                             (cycle_id,),
                         )
@@ -318,7 +314,7 @@ class SearchEngine:
                             entry.test_cycle_name = cycles[0]["name"]
                             plan_id = cycles[0]["test_plan_id"]
                             entry.test_plan_id = plan_id
-                            plans = await self._cache._db.execute_fetchall(
+                            plans = await db._conn.execute_fetchall(
                                 "SELECT name FROM test_plans WHERE id = ?",
                                 (plan_id,),
                             )
@@ -326,27 +322,21 @@ class SearchEngine:
                                 entry.test_plan_name = plans[0]["name"]
 
             elif r.doc_type == "item":
-                # Enrich with parent context
-                item = await self._cache.get_item(r.entity_id)
+                item = await db.get_item(r.entity_id)
                 if item:
                     parent_id = item.get("parent_id")
                     if parent_id:
-                        parent = await self._cache.get_item(parent_id)
+                        parent = await db.get_item(parent_id)
                         entry.parent = {
                             "item_id": parent_id,
                             "document_key": parent.get("document_key", "") if parent else "",
                             "name": parent.get("name", "") if parent else "",
                         } if parent else {"item_id": parent_id}
-                    children = await self._cache.get_item_children(r.entity_id)
+                    children = await db.get_item_children(r.entity_id)
                     entry.children_count = len(children)
 
             elif r.doc_type == "test_plan":
-                # Enrich with cycle count
-                cycles = (
-                    await self._cache.get_test_cycles_for_plan(r.entity_id)
-                    if hasattr(self._cache, "get_test_cycles_for_plan")
-                    else await self._cache.get_test_cycles(r.entity_id)
-                )
+                cycles = await db.get_test_cycles_for_plan(r.entity_id)
                 entry.cycle_count = len(cycles) if cycles else 0
 
             enriched.append(entry)
@@ -429,16 +419,13 @@ class SearchEngine:
         summary: dict[str, Any] = {}
         for key, value in fields.items():
             if isinstance(value, str):
-                # Strip HTML from rich text fields
                 if "<" in value and ">" in value:
                     summary[key] = self._strip_html(value)[:500]
                 else:
                     summary[key] = value
             elif isinstance(value, dict):
-                # Pick list values: {"id": 123, "display": "Active"}
                 summary[key] = value.get("display", value.get("name", str(value)))
             elif isinstance(value, list):
-                # Multi-select: list of dicts
                 if value and isinstance(value[0], dict):
                     summary[key] = [v.get("display", v.get("name", str(v))) for v in value]
                 else:

@@ -800,6 +800,126 @@ class ProjectDb:
         await db.commit()
         await self._rebuild_fts()
 
+    # ---------- FTS Search ----------
+
+    async def search_items(
+        self,
+        query: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """FTS5 search over items in this project's DB.
+
+        Returns rows from unified_fts_content (doc_type='item') enriched with
+        bm25 rank. Used by SearchEngine as the primary search backend.
+        """
+        sql = """
+            SELECT c.*, bm25(unified_fts) AS rank
+            FROM unified_fts_content c
+            JOIN unified_fts f ON f.rowid = c.rowid
+            WHERE unified_fts MATCH ?
+              AND c.doc_type = 'item'
+            ORDER BY rank
+            LIMIT ?
+        """
+        try:
+            rows = await self._conn.execute_fetchall(sql, (query, limit))
+            # Join back to items table for full item data
+            results = []
+            for r in rows:
+                item = await self.get_item(r["entity_id"])
+                if item:
+                    item["rank"] = r["rank"]
+                    results.append(item)
+            return results
+        except Exception as exc:
+            logger.warning("FTS search failed in ProjectDb %d: %s", self._project_id, exc)
+            return []
+
+    async def unified_search(
+        self,
+        query: str,
+        doc_types: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Unified FTS5 search across items, test plans, cycles, and runs.
+
+        Returns rows from unified_fts_content with bm25 rank, filtered by
+        optional doc_types list. Used as the primary search backend for all
+        MCP search tools.
+        """
+        if doc_types:
+            placeholders = ",".join("?" for _ in doc_types)
+            sql = f"""
+                SELECT c.*, bm25(unified_fts) AS rank
+                FROM unified_fts_content c
+                JOIN unified_fts f ON f.rowid = c.rowid
+                WHERE unified_fts MATCH ?
+                  AND c.doc_type IN ({placeholders})
+                ORDER BY rank
+                LIMIT ?
+            """
+            params = [query, *doc_types, limit]
+        else:
+            sql = """
+                SELECT c.*, bm25(unified_fts) AS rank
+                FROM unified_fts_content c
+                JOIN unified_fts f ON f.rowid = c.rowid
+                WHERE unified_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """
+            params = [query, limit]
+        try:
+            rows = await self._conn.execute_fetchall(sql, params)
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.warning("Unified FTS search failed in ProjectDb %d: %s", self._project_id, exc)
+            return []
+
+    async def get_item_by_document_key(self, document_key: str) -> dict[str, Any] | None:
+        """Already defined above — alias kept for SearchEngine compatibility."""
+        return await fetch_one(
+            self._conn,
+            "SELECT * FROM items WHERE document_key=? LIMIT 1",
+            document_key,
+        )
+
+    async def get_upstream_relations(self, item_id: int) -> list[dict[str, Any]]:
+        """Return upstream relationships for an item."""
+        return await fetch_all(
+            self._conn,
+            """SELECT r.*, fi.document_key AS from_document_key, fi.name AS from_name,
+                      ti.document_key AS to_document_key, ti.name AS to_name
+               FROM relationships r
+               LEFT JOIN items fi ON fi.id = r.from_item
+               LEFT JOIN items ti ON ti.id = r.to_item
+               WHERE r.to_item = ?""",
+            item_id,
+        )
+
+    async def get_downstream_relations(self, item_id: int) -> list[dict[str, Any]]:
+        """Return downstream relationships for an item."""
+        return await fetch_all(
+            self._conn,
+            """SELECT r.*, fi.document_key AS from_document_key, fi.name AS from_name,
+                      ti.document_key AS to_document_key, ti.name AS to_name
+               FROM relationships r
+               LEFT JOIN items fi ON fi.id = r.from_item
+               LEFT JOIN items ti ON ti.id = r.to_item
+               WHERE r.from_item = ?""",
+            item_id,
+        )
+
+    async def get_test_run(self, run_id: int) -> dict[str, Any] | None:
+        """Return a single test run by ID."""
+        return await fetch_one(self._conn, "SELECT * FROM test_runs WHERE id=?", run_id)
+
+    async def get_test_cycles_for_plan(self, plan_id: int) -> list[dict[str, Any]]:
+        """Return all test cycles for a given test plan."""
+        return await fetch_all(
+            self._conn, "SELECT * FROM test_cycles WHERE test_plan_id=?", plan_id
+        )
+
     async def get_stats(self) -> dict[str, Any]:
         """Return summary statistics about the database."""
         db = self._conn

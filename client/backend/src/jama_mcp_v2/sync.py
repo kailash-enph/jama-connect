@@ -1,13 +1,16 @@
-"""Delta sync engine — fetches items from Jama and upserts into cache.
+"""Sync engine — fetches items from Jama API and writes to ProjectDb.
 
-Dual-write architecture (P1 fix):
-  SyncEngine now optionally holds a reference to the CacheManager (new
-  per-project DB layer).  When present, every sync writes to BOTH the legacy
-  JamaCache (cache.db) AND the per-project ProjectDb (projects/{id}.db).
-  Errors in the secondary write are logged but do not fail the primary sync.
+Architecture (unified DB, P1 final fix):
+  ProjectDb (projects/{id}.db) is the SOLE write target for all sync
+  operations. JamaCache (cache.db) is now the edit-action log only
+  (undo/redo, key entries) and is NOT written to during sync.
 
-Perf: _sync_items() uses ProjectDb.bulk_write() context manager for the
-secondary write, deferring FTS rebuilds to a single operation at the end.
+  SyncEngine requires a CacheManager to open the target ProjectDb.
+  The JamaCache reference is retained ONLY for log_sync_start/complete
+  backward compat during the migration period.
+
+Perf: _sync_items() uses ProjectDb.bulk_write() context manager,
+deferring FTS rebuilds to a single operation (~60× speedup).
 """
 
 from __future__ import annotations
@@ -25,23 +28,18 @@ if TYPE_CHECKING:
     from .cache import JamaCache
     from .db import CacheManager, ProjectDb
 
-# Accept both old JamaCache and new ProjectDb / CacheManager
 CacheLike = Union["JamaCache", "ProjectDb", "CacheManager"]
 
 logger = logging.getLogger(__name__)
 
-# Type for progress callback
 ProgressCallback = Callable[[SyncProgress], None] | None
 
 
 class SyncEngine:
-    """Orchestrates full and incremental sync between Jama API and local cache.
+    """Orchestrates full and incremental sync between Jama API and ProjectDb.
 
-    Primary cache: legacy JamaCache (cache.db) — used by all MCP tools.
-    Secondary cache: CacheManager (projects/{id}.db) — used by VS Code extension.
-
-    Both are written during every sync so the two tracks stay in step.
-    Secondary write failures are non-fatal (logged as warnings).
+    ProjectDb is the primary and only write target for item data.
+    JamaCache is NOT written to during sync — it is the edit-action log only.
     """
 
     def __init__(
@@ -52,7 +50,7 @@ class SyncEngine:
         cache_manager: "CacheManager | None" = None,
     ):
         self._api = api
-        self._cache = cache
+        self._cache = cache        # kept only for log_sync_start/complete compat
         self._cache_manager: "CacheManager | None" = cache_manager
         self._batch_size = batch_size
         self._progress = SyncProgress()
@@ -74,6 +72,18 @@ class SyncEngine:
         )
         self._cancel_event.clear()
 
+    async def _get_project_db(self, project_id: int) -> "ProjectDb":
+        """Open and return the ProjectDb for the given project.
+
+        Raises RuntimeError if CacheManager is not configured.
+        """
+        if self._cache_manager is None:
+            raise RuntimeError(
+                "SyncEngine requires a CacheManager — "
+                "configure one in ServiceRegistry.init_mcp_services()"
+            )
+        return await self._cache_manager.get_project_db(project_id)
+
     # ---------- Full project sync ----------
 
     async def sync_project(
@@ -83,10 +93,8 @@ class SyncEngine:
     ) -> SyncProgress:
         """Full sync of a project: items, relationships, test plans/cycles/runs.
 
-        Writes to the legacy JamaCache (primary) and — when a CacheManager is
-        configured — also to the per-project ProjectDb (secondary).
+        Writes exclusively to the per-project ProjectDb.
         """
-        # Get project info
         try:
             project_data = await self._api.get_project(project_id)
         except JamaApiError as e:
@@ -95,30 +103,23 @@ class SyncEngine:
 
         project_name = project_data.get("fields", {}).get("name", f"Project {project_id}")
         self._reset_progress(project_id, project_name)
-        log_id = await self._cache.log_sync_start(project_id)
 
-        # Open secondary ProjectDb if CacheManager is available
-        project_db: "ProjectDb | None" = None
-        if self._cache_manager is not None:
-            try:
-                project_db = await self._cache_manager.get_project_db(project_id)
-                logger.info("Dual-write enabled for project %d → %s", project_id, project_db.db_path)
-            except Exception as exc:
-                logger.warning("Could not open secondary ProjectDb for %d: %s — continuing with primary only", project_id, exc)
+        try:
+            project_db = await self._get_project_db(project_id)
+        except Exception as exc:
+            logger.error("Cannot open ProjectDb for project %d: %s", project_id, exc)
+            return SyncProgress(state=SyncState.ERROR, message=str(exc))
 
-        # Upsert project into both caches
-        await self._cache.upsert_project(project_data)
-        if project_db is not None:
-            try:
-                await project_db.upsert_project(project_data)
-            except Exception as exc:
-                logger.warning("Secondary project upsert failed for %d: %s", project_id, exc)
+        log_id = await project_db.log_sync_start(project_id)
+        logger.info("Sync started for project %d → %s", project_id, project_db.db_path)
+
+        await project_db.upsert_project(project_data)
 
         try:
             t0 = time.time()
 
-            # Phase 1: Items (must complete first — sequential pagination)
-            await self._sync_items(project_id, on_progress, project_db=project_db)
+            # Phase 1: Items
+            await self._sync_items(project_id, on_progress, project_db)
             t_items = time.time() - t0
             logger.info("Phase 1 (items): %.1fs", t_items)
 
@@ -127,22 +128,17 @@ class SyncEngine:
             self._progress.message = "Syncing relationships + test management..."
             self._notify(on_progress)
             await asyncio.gather(
-                self._sync_relationships(project_id, on_progress, project_db=project_db),
-                self._sync_test_management(project_id, on_progress, project_db=project_db),
+                self._sync_relationships(project_id, on_progress, project_db),
+                self._sync_test_management(project_id, on_progress, project_db),
             )
             t_parallel = time.time() - t1
             logger.info("Phase 2+3 (rels + tests): %.1fs", t_parallel)
 
-            # Rebuild FTS index (both caches)
+            # Rebuild FTS index
             t2 = time.time()
             self._progress.message = "Rebuilding search index..."
             self._notify(on_progress)
-            await self._cache.rebuild_fts()
-            if project_db is not None:
-                try:
-                    await project_db.rebuild_fts()
-                except Exception as exc:
-                    logger.warning("Secondary FTS rebuild failed for %d: %s", project_id, exc)
+            await project_db.rebuild_fts()
             t_fts = time.time() - t2
 
             total_time = time.time() - t0
@@ -165,7 +161,7 @@ class SyncEngine:
             self._progress.message = f"Sync error: {e}"
             logger.error("Sync error for project %d: %s", project_id, e, exc_info=True)
 
-        await self._cache.log_sync_complete(
+        await project_db.log_sync_complete(
             log_id,
             total=self._progress.total_items,
             changed=self._progress.changed_items,
@@ -176,27 +172,30 @@ class SyncEngine:
             message=self._progress.message,
         )
 
+        # Update SearchEngine if this is the active project
+        try:
+            from .services import services
+            from .settings_api import _settings
+            if _settings.active_project_id == project_id and services.search_engine:
+                services.search_engine.set_db(project_db)
+        except Exception:
+            pass  # Non-fatal — SearchEngine update is best-effort
+
         return self._progress
 
     async def _sync_items(
         self,
         project_id: int,
         on_progress: ProgressCallback,
-        project_db: "ProjectDb | None" = None,
+        project_db: "ProjectDb",
     ) -> None:
-        """Fetch all items and do delta comparison, writing to both caches.
-
-        Primary write path (JamaCache) is always active.
-        Secondary write (ProjectDb) uses bulk_write() for FTS efficiency.
-        Secondary write errors are non-fatal.
-        """
+        """Fetch all items, delta-compare against ProjectDb, and upsert changed items."""
         self._progress.message = "Fetching items from Jama..."
         self._notify(on_progress)
 
-        # Get current cached versions for delta
-        cached_versions = await self._cache.get_all_versions(project_id)
+        # Delta comparison: get current versions from ProjectDb
+        cached_versions = await project_db.get_all_versions(project_id)
 
-        # Fetch all items from API
         api_items = await self._api.get_items(project_id)
         self._progress.total_items = len(api_items)
         self._progress.message = f"Processing {len(api_items)} items..."
@@ -205,39 +204,8 @@ class SyncEngine:
         api_ids: set[int] = set()
         batch: list[dict[str, Any]] = []
 
-        # Use bulk_write() context if the primary cache supports it (ProjectDb / CacheManager)
-        # Falls back to direct calls for legacy JamaCache
-        bulk_ctx = getattr(self._cache, "bulk_write", None)
-
-        async def _flush_primary(b: list[dict[str, Any]]) -> None:
-            await self._cache.upsert_items_batch(b)
-
-        async def _flush_secondary(b: list[dict[str, Any]]) -> None:
-            if project_db is None:
-                return
-            try:
-                await project_db.upsert_items_batch(b)
-            except Exception as exc:
-                logger.warning("Secondary item batch write failed: %s", exc)
-
-        if bulk_ctx is not None:
-            ctx_manager = bulk_ctx()
-        else:
-            from contextlib import asynccontextmanager
-
-            @asynccontextmanager
-            async def _noop():
-                yield self._cache
-
-            ctx_manager = _noop()
-
-        # Wrap secondary writes in bulk_write() for FTS efficiency
-        secondary_bulk_ctx = None
-        if project_db is not None:
-            try:
-                secondary_bulk_ctx = project_db.bulk_write()
-            except Exception:
-                secondary_bulk_ctx = None
+        async def _flush(b: list[dict[str, Any]]) -> None:
+            await project_db.upsert_items_batch(b)
 
         async def _run_sync():
             nonlocal batch
@@ -260,34 +228,21 @@ class SyncEngine:
                 self._progress.processed_items += 1
 
                 if len(batch) >= self._batch_size:
-                    await _flush_primary(batch)
-                    await _flush_secondary(batch)
+                    await _flush(batch)
                     batch.clear()
                     self._notify(on_progress)
 
-            # Flush remaining batch inside the bulk_write context
             if batch:
-                await _flush_primary(batch)
-                await _flush_secondary(batch)
+                await _flush(batch)
 
-        if secondary_bulk_ctx is not None:
-            async with ctx_manager:
-                async with secondary_bulk_ctx:
-                    await _run_sync()
-        else:
-            async with ctx_manager:
-                await _run_sync()
+        async with project_db.bulk_write():
+            await _run_sync()
 
-        # Detect deletions
+        # Detect and delete removed items
         deleted_ids = set(cached_versions.keys()) - api_ids
         if deleted_ids:
             self._progress.deleted_items = len(deleted_ids)
-            await self._cache.delete_items(list(deleted_ids))
-            if project_db is not None:
-                try:
-                    await project_db.delete_items(list(deleted_ids))
-                except Exception as exc:
-                    logger.warning("Secondary delete_items failed: %s", exc)
+            await project_db.delete_items(list(deleted_ids))
 
         self._progress.message = (
             f"Items: {self._progress.new_items} new, "
@@ -307,25 +262,15 @@ class SyncEngine:
         self,
         project_id: int,
         on_progress: ProgressCallback,
-        project_db: "ProjectDb | None" = None,
+        project_db: "ProjectDb",
     ) -> None:
-        """Sync relationships for a project (dual-write when project_db is set).
-
-        Uses the bulk /relationships endpoint. If it fails (newer Jama versions
-        require ``lastId`` cursor), relationships are skipped during sync and
-        fetched on-demand per-item in the viewer.
-        """
+        """Sync relationships — writes to ProjectDb only."""
         self._progress.message = "Syncing relationships..."
         self._notify(on_progress)
 
         try:
             rels = await self._api.get_relationships(project_id)
-            await self._cache.upsert_relationships_batch(rels, project_id)
-            if project_db is not None:
-                try:
-                    await project_db.upsert_relationships_batch(rels, project_id)
-                except Exception as exc:
-                    logger.warning("Secondary relationships write failed: %s", exc)
+            await project_db.upsert_relationships_batch(rels, project_id)
             logger.info("Project %d: %d relationships synced", project_id, len(rels))
         except JamaApiError as e:
             logger.warning(
@@ -338,41 +283,20 @@ class SyncEngine:
         self,
         project_id: int,
         on_progress: ProgressCallback,
-        project_db: "ProjectDb | None" = None,
+        project_db: "ProjectDb",
     ) -> None:
-        """Sync test plans, cycles, and runs — with concurrent fetching.
-
-        Dual-write: when project_db is provided, all test data is also written
-        to the per-project ProjectDb. Failures are non-fatal.
-        """
+        """Sync test plans, cycles, and runs — writes to ProjectDb only."""
         self._progress.message = "Syncing test management data..."
         self._notify(on_progress)
-
-        async def _sec_upsert(coro_factory):
-            """Run a secondary-cache write; swallow exceptions."""
-            if project_db is None:
-                return
-            try:
-                await coro_factory()
-            except Exception as exc:
-                logger.warning("Secondary test-mgmt write failed: %s", exc)
 
         try:
             plans = await self._api.get_test_plans(project_id)
 
-            # Upsert all plans first.
-            # ProjectDb.upsert_test_plan() uses self._project_id internally;
-            # legacy JamaCache.upsert_test_plan() accepts (plan, project_id).
             for plan in plans:
-                try:
-                    await self._cache.upsert_test_plan(plan)
-                except TypeError:
-                    await self._cache.upsert_test_plan(plan, project_id)  # legacy shim
-                await _sec_upsert(lambda p=plan: project_db.upsert_test_plan(p))  # type: ignore[union-attr]
+                await project_db.upsert_test_plan(plan)
 
-            # Fetch cycles for ALL plans concurrently
+            # Fetch cycles for all plans concurrently
             async def sync_plan_cycles(plan: dict) -> list[tuple[dict, int]]:
-                """Returns list of (cycle, plan_id) tuples."""
                 if self._cancel_event.is_set():
                     raise asyncio.CancelledError()
                 try:
@@ -388,19 +312,16 @@ class SyncEngine:
             )
             all_cycles = [item for sublist in cycle_results for item in sublist]
 
-            # Upsert all cycles
             for cycle, plan_id in all_cycles:
-                await self._cache.upsert_test_cycle(cycle, plan_id)
-                await _sec_upsert(lambda c=cycle, pid=plan_id: project_db.upsert_test_cycle(c, pid))  # type: ignore[union-attr]
+                await project_db.upsert_test_cycle(cycle, plan_id)
 
-            # Fetch runs for ALL cycles concurrently
+            # Fetch runs for all cycles concurrently
             async def sync_cycle_runs(cycle: dict, plan_id: int) -> None:
                 if self._cancel_event.is_set():
                     raise asyncio.CancelledError()
                 try:
                     runs = await self._api.get_test_runs(cycle["id"])
-                    await self._cache.upsert_test_runs_batch(runs, cycle["id"])
-                    await _sec_upsert(lambda r=runs, cid=cycle["id"]: project_db.upsert_test_runs_batch(r, cid))  # type: ignore[union-attr]
+                    await project_db.upsert_test_runs_batch(runs, cycle["id"])
                 except JamaApiError as e:
                     logger.warning("Failed to sync test runs for cycle %d: %s", cycle["id"], e)
                     self._progress.errors += 1
@@ -409,7 +330,10 @@ class SyncEngine:
                 *(sync_cycle_runs(c, pid) for c, pid in all_cycles)
             )
 
-            logger.info("Project %d: %d test plans, %d cycles synced", project_id, len(plans), len(all_cycles))
+            logger.info(
+                "Project %d: %d test plans, %d cycles synced",
+                project_id, len(plans), len(all_cycles),
+            )
 
         except JamaApiError as e:
             logger.warning("Failed to sync test plans for project %d: %s", project_id, e)
@@ -424,31 +348,29 @@ class SyncEngine:
     ) -> SyncProgress:
         """Incremental sync — only fetch items modified since last sync.
 
-        Dual-write: when cache_manager is available, also updates the ProjectDb.
+        Reads the last sync timestamp from ProjectDb.
+        Writes exclusively to ProjectDb.
         """
-        last_sync = await self._cache.get_last_sync(project_id)
+        try:
+            project_db = await self._get_project_db(project_id)
+        except Exception as exc:
+            logger.error("Cannot open ProjectDb for incremental sync %d: %s", project_id, exc)
+            return SyncProgress(state=SyncState.ERROR, message=str(exc))
+
+        last_sync = await project_db.get_last_sync(project_id)
         if not last_sync or not last_sync.get("completed_at"):
             logger.info("No previous sync found, doing full sync for project %d", project_id)
             return await self.sync_project(project_id, on_progress)
 
-        # Jama API requires ISO 8601: yyyy-MM-dd'T'HH:mm:ss.SSSZ
         raw_since = last_sync["completed_at"]
-        from datetime import datetime, timezone
         try:
             dt = datetime.fromisoformat(raw_since)
             since = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}+0000"
         except (ValueError, TypeError):
             since = raw_since
-        self._reset_progress(project_id)
-        log_id = await self._cache.log_sync_start(project_id)
 
-        # Open secondary ProjectDb for dual-write
-        project_db: "ProjectDb | None" = None
-        if self._cache_manager is not None:
-            try:
-                project_db = await self._cache_manager.get_project_db(project_id)
-            except Exception as exc:
-                logger.warning("Could not open secondary ProjectDb for incremental sync %d: %s", project_id, exc)
+        self._reset_progress(project_id)
+        log_id = await project_db.log_sync_start(project_id)
 
         try:
             self._progress.message = f"Fetching items modified since {since}..."
@@ -462,7 +384,6 @@ class SyncEngine:
                 if self._cancel_event.is_set():
                     raise asyncio.CancelledError()
 
-                # Fetch full item detail
                 try:
                     full_item = await self._api.get_item(item_data["id"])
                     batch.append(full_item)
@@ -474,30 +395,14 @@ class SyncEngine:
                 self._progress.processed_items += 1
 
                 if len(batch) >= self._batch_size:
-                    await self._cache.upsert_items_batch(batch)
-                    if project_db is not None:
-                        try:
-                            await project_db.upsert_items_batch(batch)
-                        except Exception as exc:
-                            logger.warning("Secondary incremental batch failed: %s", exc)
+                    await project_db.upsert_items_batch(batch)
                     batch.clear()
                     self._notify(on_progress)
 
             if batch:
-                await self._cache.upsert_items_batch(batch)
-                if project_db is not None:
-                    try:
-                        await project_db.upsert_items_batch(batch)
-                    except Exception as exc:
-                        logger.warning("Secondary incremental final batch failed: %s", exc)
+                await project_db.upsert_items_batch(batch)
 
-            # Rebuild FTS (both caches)
-            await self._cache.rebuild_fts()
-            if project_db is not None:
-                try:
-                    await project_db.rebuild_fts()
-                except Exception as exc:
-                    logger.warning("Secondary FTS rebuild failed (incremental): %s", exc)
+            await project_db.rebuild_fts()
 
             self._progress.state = SyncState.DONE
             self._progress.completed_at = datetime.now(timezone.utc)
@@ -511,9 +416,9 @@ class SyncEngine:
             self._progress.state = SyncState.ERROR
             self._progress.errors += 1
             self._progress.message = f"Incremental sync error: {e}"
-            logger.error("Incremental sync error: %s", e, exc_info=True)
+            logger.error("Incremental sync error for project %d: %s", project_id, e, exc_info=True)
 
-        await self._cache.log_sync_complete(
+        await project_db.log_sync_complete(
             log_id,
             total=self._progress.total_items,
             changed=self._progress.changed_items,
@@ -524,24 +429,20 @@ class SyncEngine:
             message=self._progress.message,
         )
 
+        # Update SearchEngine if this is the active project
+        try:
+            from .services import services
+            from .settings_api import _settings
+            if _settings.active_project_id == project_id and services.search_engine:
+                services.search_engine.set_db(project_db)
+        except Exception:
+            pass
+
         return self._progress
 
-    # ---------- Multi-project sync ----------
-
-    async def sync_multiple_projects(
-        self,
-        project_ids: list[int],
-        on_progress: ProgressCallback = None,
-    ) -> list[SyncProgress]:
-        """Sync multiple projects sequentially."""
-        results: list[SyncProgress] = []
-        for pid in project_ids:
-            result = await self.sync_project(pid, on_progress)
-            results.append(result)
-        return results
-
-    # ---------- Helpers ----------
-
-    def _notify(self, callback: ProgressCallback) -> None:
-        if callback:
-            callback(self._progress)
+    def _notify(self, on_progress: ProgressCallback) -> None:
+        if on_progress:
+            try:
+                on_progress(self._progress)
+            except Exception:
+                pass

@@ -190,35 +190,58 @@ async def jama_get_project(ctx: Context, project_id: int) -> dict:
 
 @mcp.tool()
 async def jama_get_item(ctx: Context, item_id: int) -> dict:
-    """Get a single Jama item by ID."""
-    _need(cache, "cache"); _need(api_client, "api_client")
-    cached = await cache.get_item(item_id)
-    if cached:
-        return cached
+    """Get a single Jama item by ID from the active project's local DB.
+
+    Falls back to the live Jama API and writes the result to ProjectDb
+    if the item is not cached locally.
+    """
+    from .settings_api import _settings
+    pid = _settings.active_project_id
+    if pid and services.cache_manager:
+        pdb = await services.get_active_project_db(pid)
+        if pdb:
+            cached = await pdb.get_item(item_id)
+            if cached:
+                return cached
+    # Not in ProjectDb — fetch live and write back
+    _need(api_client, "api_client")
     data = await api_client.get_item(item_id)
-    await cache.upsert_item(data)
+    if pid and services.cache_manager:
+        pdb = await services.get_active_project_db(pid)
+        if pdb:
+            await pdb.upsert_item(data)
     return data
 
 
 @mcp.tool()
 async def jama_get_item_children(ctx: Context, item_id: int) -> list[dict]:
-    """Get child items of a Jama item."""
-    _need(cache, "cache")
-    cached = await cache.get_item_children(item_id)
-    if cached:
-        return cached
+    """Get child items of a Jama item from the active project's local DB."""
+    from .settings_api import _settings
+    pid = _settings.active_project_id
+    if pid and services.cache_manager:
+        pdb = await services.get_active_project_db(pid)
+        if pdb:
+            cached = await pdb.get_item_children(item_id)
+            if cached:
+                return cached
+    # Not in ProjectDb — fetch live and write back
     _need(api_client, "api_client")
     children = await api_client.get_item_children(item_id)
-    for c in children:
-        await cache.upsert_item(c)
+    if pid and services.cache_manager:
+        pdb = await services.get_active_project_db(pid)
+        if pdb:
+            for c in children:
+                await pdb.upsert_item(c)
     return children
 
 
 @mcp.tool()
 async def jama_get_item_tree(ctx: Context, project_id: int, root_id: int | None = None) -> list[dict]:
-    """Get the item tree for a project (or subtree from root_id)."""
-    _need(cache, "cache")
-    items = await cache.get_items_by_project(project_id)
+    """Get the item tree for a project (or subtree from root_id) — reads from ProjectDb."""
+    pdb = await services.get_active_project_db(project_id)
+    if pdb is None:
+        return []
+    items = await pdb.get_items_by_project(project_id)
     tree = build_tree(items, root_id)
     return [n.model_dump() for n in tree]
 
@@ -227,9 +250,11 @@ async def jama_get_item_tree(ctx: Context, project_id: int, root_id: int | None 
 
 @mcp.tool()
 async def jama_get_relationships(ctx: Context, project_id: int) -> list[dict]:
-    """Get all relationships for a project."""
-    _need(cache, "cache")
-    return await cache.get_relationships(project_id)
+    """Get all relationships for a project — reads from ProjectDb."""
+    pdb = await services.get_active_project_db(project_id)
+    if pdb is None:
+        return []
+    return await pdb.get_relationships(project_id)
 
 
 @mcp.tool()
@@ -372,37 +397,10 @@ async def jama_deep_search(
     _need(search_engine, "search_engine")
 
     # Use unified deep search (covers items + test runs + plans + cycles)
+    # Relationship enrichment is handled inside SearchEngine using ProjectDb
     unified_results = await search_engine.unified_deep_search(
         query, project_id=project_id, limit=limit,
     )
-
-    # For items with include_relations, enrich with traceability
-    if include_relations:
-        for entry in unified_results:
-            if entry.doc_type == "item":
-                item_id = entry.entity_id
-                upstream = await cache.get_item_upstream_relations(item_id)
-                downstream = await cache.get_item_downstream_relations(item_id)
-                entry.upstream_items = [
-                    {
-                        "item_id": r["from_item"],
-                        "document_key": r.get("from_document_key", ""),
-                        "name": r.get("from_name", ""),
-                        "relationship_type": r.get("relationship_type"),
-                        "suspect": r.get("suspect", False),
-                    }
-                    for r in upstream
-                ]
-                entry.downstream_items = [
-                    {
-                        "item_id": r["to_item"],
-                        "document_key": r.get("to_document_key", ""),
-                        "name": r.get("to_name", ""),
-                        "relationship_type": r.get("relationship_type"),
-                        "suspect": r.get("suspect", False),
-                    }
-                    for r in downstream
-                ]
 
     return [r.model_dump(mode="json") for r in unified_results]
 
@@ -1618,54 +1616,42 @@ async def api_project(project_id: int):
 
 @rest_app.get("/api/projects/{project_id}/items")
 async def api_items(project_id: int):
-    _need(cache, "cache")
-    items = await cache.get_items_by_project(project_id)
-    # P1 read-path: fall back to per-project DB if JamaCache is empty
-    if not items and services.cache_manager:
-        try:
-            if await services.cache_manager.has_project_db(project_id):
-                pdb = await services.cache_manager.get_project_db(project_id)
-                items = await pdb.get_items_by_project(project_id)
-        except Exception as exc:
-            logger.warning("ProjectDb items fallback failed for project %d: %s", project_id, exc)
-    return items
+    """All items for a project — reads from ProjectDb only."""
+    pdb = await services.get_active_project_db(project_id)
+    if pdb is None:
+        return []
+    return await pdb.get_items_by_project(project_id)
 
 
 @rest_app.get("/api/items/resolve")
-async def api_resolve_item(key: str = Query(..., description="Document key (SET-43) or numeric Jama item ID")):
-    """Resolve a document key or item ID to a full item.
+async def api_resolve_item(
+    key: str = Query(..., description="Document key (SET-43) or numeric Jama item ID"),
+    project_id: int | None = Query(None),
+):
+    """Resolve a document key or item ID — reads from ProjectDb of given project (or active project)."""
+    pid = project_id
+    if pid is None:
+        from .settings_api import _settings
+        pid = _settings.active_project_id
+    if pid is None:
+        raise HTTPException(503, "No active project set — select a project first")
 
-    Accepts: SET-43, IQ_BATT_R5-SET-43, CMP-12, or numeric ID 5624955.
-    Short keys (SET-43) are matched via suffix (%-SET-43).
-    """
-    _need(cache, "cache")
+    pdb = await services.get_active_project_db(pid)
+    if pdb is None:
+        raise HTTPException(404, f"No local DB for project {pid} — download or sync first")
+
     k = key.strip()
-
-    # Try exact document_key first (e.g. IQ_BATT_R5-SET-43)
-    item = await cache.get_item_by_document_key(k)
+    item = await pdb.get_item_by_document_key(k.upper())
     if item:
         return item
-
-    # Try suffix match for short keys (SET-43 → %-SET-43)
-    if not item and "-" in k and not k[0].isdigit():
-        _need(cache, "cache"); _need(cache._db, "cache._db")
-        rows = await cache._db.execute_fetchall(
-            "SELECT * FROM items WHERE document_key LIKE ? LIMIT 1",
-            (f"%-{k}",),
-        )
-        if rows:
-            item = dict(rows[0])
-            if "fields_json" in item:
-                import json as _json
-                try:
-                    item["fields"] = _json.loads(item["fields_json"])
-                except Exception:
-                    pass
+    # Suffix match for short keys (SET-43 → IQ_BATT_R5-SET-43)
+    if "-" in k and not k[0].isdigit():
+        item = await pdb.get_item_by_document_key_suffix(k.upper())
+        if item:
             return item
-
-    # Try as numeric item ID
+    # Numeric item ID
     try:
-        item = await cache.get_item(int(k))
+        item = await pdb.get_item(int(k))
     except (ValueError, TypeError):
         item = None
     if not item:
@@ -1674,42 +1660,85 @@ async def api_resolve_item(key: str = Query(..., description="Document key (SET-
 
 
 @rest_app.get("/api/items/{item_id}")
-async def api_item(item_id: int, live: bool = Query(False)):
-    _need(cache, "cache")
+async def api_item(
+    item_id: int,
+    live: bool = Query(False),
+    project_id: int | None = Query(None),
+):
+    """Fetch a single item.
+
+    live=true  → fetch from Jama API then write back to ProjectDb
+    live=false → read from ProjectDb (primary store)
+    """
+    pid = project_id
+    if pid is None:
+        from .settings_api import _settings
+        pid = _settings.active_project_id
+
     if live and api_client:
         try:
             raw = await api_client.get_item(item_id)
-            await cache.upsert_item(raw)
-            # Evict LRU so get_item reads the normalized row from SQLite
-            cache._item_lru.pop(item_id, None)
-            item = await cache.get_item(item_id)
+            # Write back to ProjectDb if we know the project
+            if pid and services.cache_manager:
+                pdb = await services.get_active_project_db(pid)
+                if pdb:
+                    await pdb.upsert_item(raw)
+                    item = await pdb.get_item(item_id)
+                    if item:
+                        return item
+            # Return the raw API response if no ProjectDb available
+            return raw
+        except Exception:
+            pass  # Fall through to cached read
+
+    if pid:
+        pdb = await services.get_active_project_db(pid)
+        if pdb:
+            item = await pdb.get_item(item_id)
             if item:
                 return item
-        except Exception:
-            pass  # Fall back to cache
-    item = await cache.get_item(item_id)
-    if not item:
-        raise HTTPException(404, "Item not found in cache")
-    return item
+
+    raise HTTPException(404, "Item not found — download or sync the project first")
 
 
 @rest_app.get("/api/items/{item_id}/children")
-async def api_item_children(item_id: int, live: bool = Query(False)):
-    _need(cache, "cache")
+async def api_item_children(
+    item_id: int,
+    live: bool = Query(False),
+    project_id: int | None = Query(None),
+):
+    """Children of an item — reads from ProjectDb."""
+    pid = project_id
+    if pid is None:
+        from .settings_api import _settings
+        pid = _settings.active_project_id
+
     if live and api_client:
         try:
             children = await api_client.get_item_children(item_id)
-            for child in children:
-                await cache.upsert_item(child)
+            if pid and services.cache_manager:
+                pdb = await services.get_active_project_db(pid)
+                if pdb:
+                    for child in children:
+                        await pdb.upsert_item(child)
+            return children
         except Exception:
-            pass  # Fall back to cache
-    return await cache.get_item_children(item_id)
+            pass  # Fall through to cached read
+
+    if pid:
+        pdb = await services.get_active_project_db(pid)
+        if pdb:
+            return await pdb.get_item_children(item_id)
+    return []
 
 
 @rest_app.get("/api/items/{item_id}/ancestors")
 async def api_item_ancestors(item_id: int, project_id: int = Query(...)):
-    _need(cache, "cache")
-    items = await cache.get_items_by_project(project_id)
+    """Ancestor chain for an item — reads from ProjectDb."""
+    pdb = await services.get_active_project_db(project_id)
+    if pdb is None:
+        return []
+    items = await pdb.get_items_by_project(project_id)
     return get_ancestors(items, item_id)
 
 
@@ -1717,35 +1746,15 @@ async def api_item_ancestors(item_id: int, project_id: int = Query(...)):
 
 @rest_app.get("/api/projects/{project_id}/tree")
 async def api_tree(project_id: int, root_id: int | None = None):
-    """Return the item tree for a project.
+    """Return the item tree for a project — reads from ProjectDb only.
 
-    Read-path priority (P1 read-path fix):
-      1. JamaCache (cache.db) — populated by MCP sync tools
-      2. ProjectDb (projects/{id}.db) — downloaded from LAN cache server
-         or populated by the dual-write sync path
-
-    If JamaCache has no items for the project, the per-project DB is checked
-    automatically so that LAN-downloaded databases are immediately visible
-    without requiring a full MCP sync.
+    Returns [] when no local DB exists; the extension shows the
+    'No items cached' hint and the user can download from the LAN server.
     """
-    _need(cache, "cache")
-    items = await cache.get_items_by_project(project_id)
-
-    # P1 read-path: fall back to per-project DB if JamaCache is empty
-    if not items and services.cache_manager:
-        try:
-            if await services.cache_manager.has_project_db(project_id):
-                pdb = await services.cache_manager.get_project_db(project_id)
-                items = await pdb.get_items_by_project(project_id)
-                if items:
-                    logger.debug(
-                        "Tree for project %d: served %d items from ProjectDb "
-                        "(JamaCache empty — using LAN-downloaded DB)",
-                        project_id, len(items),
-                    )
-        except Exception as exc:
-            logger.warning("ProjectDb tree fallback failed for project %d: %s", project_id, exc)
-
+    pdb = await services.get_active_project_db(project_id)
+    if pdb is None:
+        return []
+    items = await pdb.get_items_by_project(project_id)
     type_map = await _get_item_type_map()
     tree = build_tree(items, root_id, item_type_map=type_map)
     return [n.model_dump() for n in tree]
@@ -1802,24 +1811,30 @@ async def api_item_at_version(item_id: int, version_num: int):
 
 @rest_app.get("/api/projects/{project_id}/relationships")
 async def api_relationships(project_id: int):
-    _need(cache, "cache")
-    return await cache.get_relationships(project_id)
+    """Relationships for a project — reads from ProjectDb."""
+    pdb = await services.get_active_project_db(project_id)
+    if pdb is None:
+        return []
+    return await pdb.get_relationships(project_id)
 
 
-async def _resolve_relationships(rels: list[dict], direction: str) -> list[dict]:
+async def _resolve_relationships(rels: list[dict], direction: str, project_id: int | None = None) -> list[dict]:
     """Resolve relationship list into items the frontend can display.
 
     Each relationship has fromItem / toItem IDs.  For 'upstream' we want
     the fromItem details; for 'downstream' we want the toItem details.
     """
-    _need(cache, "cache")
+    from .settings_api import _settings
+    pid = project_id or _settings.active_project_id
+    pdb = await services.get_active_project_db(pid) if pid else None
+
     results = []
     for r in rels:
         target_id = r.get("fromItem") if direction == "upstream" else r.get("toItem")
         if not target_id:
             continue
-        # Try local cache first, then fall back to live API
-        item = await cache.get_item(target_id)
+        # Try ProjectDb first, then fall back to live API
+        item = await pdb.get_item(target_id) if pdb else None
         if item:
             results.append({
                 "id": item["id"],

@@ -211,6 +211,9 @@ async def select_project(request: Request):
     _settings.active_project_name = body.get("project_name", "")
     _save_settings(_settings)
 
+    # Open the ProjectDb and update SearchEngine for the new active project
+    asyncio.create_task(services.set_active_project(pid))
+
     # Optionally trigger sync
     if body.get("sync", False) and services.sync_engine:
         asyncio.create_task(services.sync_engine.sync_project(pid))

@@ -150,6 +150,41 @@ class ServiceRegistry:
         import time
         return time.time() - self._start_time
 
+    async def set_active_project(self, project_id: int) -> None:
+        """Switch the active project.
+
+        Opens (or retrieves) the per-project ProjectDb and updates
+        SearchEngine so all subsequent reads and searches use that DB.
+        Called whenever the user selects a project in the extension or
+        sets it via POST /settings/project/{id}.
+        """
+        if self.cache_manager is None:
+            return
+        try:
+            pdb = await self.cache_manager.get_project_db(project_id)
+            if self.search_engine is not None:
+                self.search_engine.set_db(pdb)
+            logger.info("Active project set to %d — ProjectDb ready for all reads", project_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not open ProjectDb for project %d: %s — "
+                "search/tree will be unavailable until synced or downloaded",
+                project_id, exc,
+            )
+            if self.search_engine is not None:
+                self.search_engine.set_db(None)
+
+    async def get_active_project_db(self, project_id: int):
+        """Return the open ProjectDb for a project, or None if not available."""
+        if self.cache_manager is None:
+            return None
+        try:
+            if await self.cache_manager.has_project_db(project_id):
+                return await self.cache_manager.get_project_db(project_id)
+        except Exception:
+            pass
+        return None
+
     async def init_mcp_services(self) -> None:
         """Initialize core MCP/Viewer services (API client, cache, sync, etc.)."""
         if self._mcp_initialized:
@@ -185,21 +220,22 @@ class ServiceRegistry:
         self.api_client = JamaApiClient(JAMA_URL, cid, csec, max_concurrent=MAX_CONCURRENT)
         await self.api_client.open()
 
-        # Legacy single-file cache (backward compat — used by MCP tools + search)
+        # JamaCache: kept for edit-log / undo-redo only (NOT used for reads)
         self.cache = JamaCache(CACHE_DIR)
         await self.cache.open()
 
-        # New multi-project DB manager (used by REST API routes + VS Code extension)
+        # CacheManager: per-project ProjectDb pool — primary store for ALL reads + writes
         cache_dir = Path(os.path.expanduser(CACHE_DIR))
         self.cache_manager = CacheManager(cache_dir)
         await self.cache_manager.open()
 
-        # Pass cache_manager so SyncEngine dual-writes to per-project DBs (P1 fix)
+        # SyncEngine writes to ProjectDb (primary); JamaCache kept for compat
         self.sync_engine = SyncEngine(self.api_client, self.cache, cache_manager=self.cache_manager)
         self.test_manager = TestManager(self.api_client, self.cache)
         self.writer = Writer(self.api_client, self.cache)
         self.exporter = Exporter(self.cache)
-        self.search_engine = SearchEngine(self.cache)
+        # SearchEngine starts with no active DB — set when project is selected
+        self.search_engine = SearchEngine(None)
         self.attachment_mgr = AttachmentManager(self.api_client, self.cache, CACHE_DIR)
         self.progress_bus = ProgressBus()
 
