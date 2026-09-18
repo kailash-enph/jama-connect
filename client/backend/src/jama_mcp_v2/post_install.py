@@ -1,4 +1,4 @@
-"""Post-install helper: stop daemon, repair installation, set up Devin MCP link,
+﻿"""Post-install helper: stop daemon, repair installation, set up Devin MCP link,
 install VS Code/Devin extension, start backend.
 
 Usage:
@@ -11,13 +11,13 @@ Usage:
 Run once after `pip install jama-connect`. Safe to run multiple times.
 
 Steps:
-  0. Stop     — gracefully stop any running jama-connect daemon (REST + MCP)
-  1. Repair   — remove corrupted ~ama-* entries and stale old dist-infos
-  2. Symlink  — create ~/.devin/mcp-servers/jama-connect -> site-packages parent
-  3. Patch    — overwrite out/ JS in all installed extension dirs (fast update)
-  4. Devin    — extract bundled .vsix to ~/.devin/extensions/
-  5. VS Code  — install bundled .vsix via `code --install-extension`
-  6. Start    — launch jama-rest daemon in the background
+  0. Stop     -- gracefully stop any running jama-connect daemon (REST + MCP)
+  1. Repair   -- remove corrupted ~ama-* entries and stale old dist-infos
+  2. Symlink  -- create ~/.devin/mcp-servers/jama-connect -> site-packages parent
+  3. Patch    -- overwrite out/ JS in all installed extension dirs (fast update)
+  4. Devin    -- extract bundled .vsix to ~/.devin/extensions/
+  5. VS Code  -- install bundled .vsix via `code --install-extension`
+  6. Start    -- launch jama-rest daemon in the background
 
 Learnings captured:
   - pip --force-reinstall while daemon is running leaves ~ama-* corruption
@@ -52,6 +52,19 @@ def get_package_dir() -> Path:
     return Path(__file__).parent
 
 
+def _is_editable_install() -> bool:
+    """Return True if jama-connect is installed in editable (development) mode."""
+    try:
+        import importlib.metadata as _meta
+        direct_url = _meta.distribution("jama-connect").read_text("direct_url.json")
+        if direct_url:
+            import json as _json
+            return _json.loads(direct_url).get("dir_info", {}).get("editable", False)
+    except Exception:
+        pass
+    return False
+
+
 def get_bundled_vsix() -> Path:
     """Return the path to the bundled VS Code extension .vsix."""
     return get_package_dir() / "data" / "jama-editor.vsix"
@@ -77,7 +90,7 @@ def _all_site_packages() -> list[Path]:
 # ---------------------------------------------------------------------------
 # Step 0: Repair installation
 # Cleans up pip artefacts left by:
-#   - force-reinstall while the daemon process has .exe files locked (→ ~ama-* corruption)
+#   - force-reinstall while the daemon process has .exe files locked (-> ~ama-* corruption)
 #   - package upgrades leaving stale dist-infos from old versions
 #   - accidental editable + wheel dual installs
 # ---------------------------------------------------------------------------
@@ -100,10 +113,10 @@ def repair_installation(check_only: bool = False) -> bool:
     """Scan all site-packages dirs and remove corrupted / stale jama-connect entries.
 
     Corruption patterns:
-      ~ama-connect-*.dist-info   — pip left a tilde-prefixed dist-info (files were locked)
-      ~ama_connect-*.dist-info   — same, underscore variant
-      ~ama_editor                — corrupted module dir
-      jama_connect-X.Y.dist-info — old version, when a newer one is already present
+      ~ama-connect-*.dist-info   -- pip left a tilde-prefixed dist-info (files were locked)
+      ~ama_connect-*.dist-info   -- same, underscore variant
+      ~ama_editor                -- corrupted module dir
+      jama_connect-X.Y.dist-info -- old version, when a newer one is already present
 
     Returns True if the environment is clean (or was cleaned).
     """
@@ -187,7 +200,7 @@ def repair_installation(check_only: bool = False) -> bool:
     if removed:
         print(f"  Cleaned {removed} entr(ies).")
     else:
-        print("  Already clean — nothing to remove.")
+        print("  Already clean -- nothing to remove.")
 
     return True
 
@@ -225,7 +238,7 @@ def stop_daemon(port: int = 8765, timeout: int = 8) -> bool:
     """Gracefully stop any running jama-connect daemon.
 
     Strategy (tried in order):
-      1. POST /settings/server/stop  — clean shutdown via REST API
+      1. POST /settings/server/stop  -- clean shutdown via REST API
       2. Kill any process whose command line contains 'jama_mcp_v2' or 'jama-rest'
 
     Returns True if daemon was already stopped or was stopped successfully.
@@ -234,7 +247,7 @@ def stop_daemon(port: int = 8765, timeout: int = 8) -> bool:
     import urllib.request
 
     if not _daemon_is_running(port):
-        print("  Daemon not running — nothing to stop.")
+        print("  Daemon not running -- nothing to stop.")
         return True
 
     # --- 1. Graceful REST shutdown ---
@@ -248,7 +261,7 @@ def stop_daemon(port: int = 8765, timeout: int = 8) -> bool:
         with urllib.request.urlopen(req, timeout=5):
             pass
     except Exception:
-        pass  # server may close the connection before responding — that's fine
+        pass  # server may close the connection before responding -- that's fine
 
     # Wait for it to die
     for _ in range(timeout * 2):
@@ -258,7 +271,7 @@ def stop_daemon(port: int = 8765, timeout: int = 8) -> bool:
             return True
 
     # --- 2. Force-kill via OS ---
-    print("  Graceful shutdown timed out — force-killing process ...")
+    print("  Graceful shutdown timed out -- force-killing process ...")
     killed = False
     if sys.platform == "win32":
         try:
@@ -290,7 +303,7 @@ def stop_daemon(port: int = 8765, timeout: int = 8) -> bool:
             print("  Daemon killed." if killed else "  Daemon no longer responding.")
             return True
 
-    print("  WARNING: Could not confirm daemon stopped — proceeding anyway.")
+    print("  WARNING: Could not confirm daemon stopped -- proceeding anyway.")
     return False
 
 
@@ -323,7 +336,7 @@ def start_backend(port: int = 8765) -> bool:
                 break
 
     if not jama_rest:
-        print("  WARNING: jama-rest not found in PATH — cannot start backend.")
+        print("  WARNING: jama-rest not found in PATH -- cannot start backend.")
         print("  Start manually: jama-rest")
         return False
 
@@ -358,7 +371,7 @@ def start_backend(port: int = 8765) -> bool:
             print(f"  Backend started and responding on port {port}.")
             return True
 
-    print(f"  Backend launched (may still be starting — check http://localhost:{port}/api/health)")
+    print(f"  Backend launched (may still be starting -- check http://localhost:{port}/api/health)")
     return True
 
 
@@ -370,14 +383,20 @@ def create_symlink(check_only: bool = False) -> bool:
     """Create or verify a Devin MCP link pointing to the installed package parent.
 
     On Windows, first tries a symlink (requires Developer Mode or admin).
-    Falls back to an NTFS junction if symlink creation fails — junctions work
+    Falls back to an NTFS junction if symlink creation fails -- junctions work
     without elevation and show as a normal directory (is_symlink() returns False,
     but _is_junction() detects them).
 
     Returns True if the link is (or was already) in place.
     """
     pkg_dir = get_package_dir()
-    target = pkg_dir.parent  # parent of jama_mcp_v2 contains both jama_mcp_v2 + jama_editor
+    if _is_editable_install():
+        # Editable: pkg_dir.parent is src/ which contains both jama_mcp_v2 + jama_editor
+        target = pkg_dir.parent
+    else:
+        # Wheel install: pkg_dir.parent is all of site-packages -- too broad.
+        # Point the junction directly at the jama_mcp_v2 package directory.
+        target = pkg_dir
     devin_dir = get_devin_mcp_dir()
     link_path = devin_dir / "jama-connect"
 
@@ -402,13 +421,13 @@ def create_symlink(check_only: bool = False) -> bool:
             kind = "junction" if _is_junction(link_path) else "symlink/dir"
             print(f"  MCP {kind} already correct: {link_path}")
             return True
-        # Wrong target — remove and recreate
+        # Wrong target -- remove and recreate
         print(f"  Updating MCP link (wrong target: {current_target})")
         try:
             if link_path.is_symlink():
                 link_path.unlink()
             elif link_path.is_dir():
-                # Junction: use rmdir (not rmtree — it would delete contents)
+                # Junction: use rmdir (not rmtree -- it would delete contents)
                 subprocess.run(["cmd", "/c", "rmdir", str(link_path)], check=True, capture_output=True)
             else:
                 link_path.unlink()
@@ -427,7 +446,7 @@ def create_symlink(check_only: bool = False) -> bool:
             return False
 
     # Windows fallback: NTFS junction (no elevation needed)
-    print("  Symlink needs admin / Developer Mode — creating junction instead...")
+    print("  Symlink needs admin / Developer Mode -- creating junction instead...")
     try:
         subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(link_path), str(target)],
@@ -446,7 +465,7 @@ def create_symlink(check_only: bool = False) -> bool:
 # When only extension.js changed (no package.json / package-level changes),
 # we can skip the slow full vsix re-extraction and just overwrite the out/
 # directory contents.  This is safe because the compiled output files are
-# deterministic — the same esbuild run always produces the same file set.
+# deterministic -- the same esbuild run always produces the same file set.
 # ---------------------------------------------------------------------------
 
 def get_bundled_extension_out() -> Path:
@@ -458,9 +477,9 @@ def _find_installed_extension_dirs() -> list[Path]:
     """Return all directories where enphase.jama-editor-* is installed.
 
     Scans the four known host locations:
-      ~/.devin/extensions/           — Devin Desktop
-      ~/.vscode/extensions/          — VS Code / Windsurf
-      %APPDATA%/Devin/               — Devin AppData (future-proofing)
+      ~/.devin/extensions/           -- Devin Desktop
+      ~/.vscode/extensions/          -- VS Code / Windsurf
+      %APPDATA%/Devin/               -- Devin AppData (future-proofing)
     """
     home = Path(os.environ.get("USERPROFILE", "~")) if sys.platform == "win32" else Path.home()
     appdata = Path(os.environ.get("APPDATA", "")) if sys.platform == "win32" else Path.home()
@@ -485,19 +504,19 @@ def patch_extension_out(check_only: bool = False) -> bool:
     """Overwrite the out/ directory of every installed enphase.jama-editor extension
     with the JS files bundled inside this pip package.
 
-    Much faster than re-extracting the full vsix — no package.json or node_modules
+    Much faster than re-extracting the full vsix -- no package.json or node_modules
     are touched, only the compiled JS bundle files.
 
     Returns True if all found installations were patched successfully (or check was OK).
     """
     src_out = get_bundled_extension_out()
     if not src_out.exists():
-        print(f"  WARNING: Bundled extension_out not found at {src_out} — skipping patch")
+        print(f"  WARNING: Bundled extension_out not found at {src_out} -- skipping patch")
         return False
 
     installs = _find_installed_extension_dirs()
     if not installs:
-        print("  No installed enphase.jama-editor extensions found — skipping patch")
+        print("  No installed enphase.jama-editor extensions found -- skipping patch")
         return True
 
     all_ok = True
@@ -512,10 +531,10 @@ def patch_extension_out(check_only: bool = False) -> bool:
             src_js = src_out / "extension.js"
             dst_js = dst_out / "extension.js"
             if not dst_js.exists():
-                print(f"  [OUTDATED] {install_dir.name} — no extension.js")
+                print(f"  [OUTDATED] {install_dir.name} -- no extension.js")
                 all_ok = False
             elif src_js.stat().st_size != dst_js.stat().st_size:
-                print(f"  [OUTDATED] {install_dir.name} — extension.js size mismatch "
+                print(f"  [OUTDATED] {install_dir.name} -- extension.js size mismatch "
                       f"(installed={dst_js.stat().st_size}, bundled={src_js.stat().st_size})")
                 all_ok = False
             else:
@@ -556,7 +575,7 @@ def _get_devin_extensions_dir() -> Path:
 
 
 def _vsix_extension_id(vsix: Path) -> str | None:
-    """Read publisher + name from the vsix's package.json → 'publisher.name'."""
+    """Read publisher + name from the vsix's package.json -> 'publisher.name'."""
     try:
         with zipfile.ZipFile(vsix) as zf:
             data = json.loads(zf.read("extension/package.json"))
@@ -582,18 +601,18 @@ def install_devin_extension(check_only: bool = False) -> bool:
     """
     vsix = get_bundled_vsix()
     if not vsix.exists():
-        print(f"  WARNING: Bundled .vsix not found at {vsix} — skipping Devin install")
+        print(f"  WARNING: Bundled .vsix not found at {vsix} -- skipping Devin install")
         return False
 
     devin_ext_dir = _get_devin_extensions_dir()
     if not devin_ext_dir.parent.exists():
-        print(f"  Devin not found at {devin_ext_dir.parent} — skipping Devin install")
+        print(f"  Devin not found at {devin_ext_dir.parent} -- skipping Devin install")
         return False
 
     ext_id = _vsix_extension_id(vsix)
     ext_ver = _vsix_version(vsix)
     if not ext_id:
-        print("  WARNING: Could not read extension ID from vsix — skipping Devin install")
+        print("  WARNING: Could not read extension ID from vsix -- skipping Devin install")
         return False
 
     install_dir = devin_ext_dir / f"{ext_id}-{ext_ver}"
@@ -655,7 +674,7 @@ def install_devin_extension(check_only: bool = False) -> bool:
 def _find_code_binary() -> str | None:
     """Find the VS Code CLI binary.
 
-    On Windows, shutil.which misses extensionless scripts — `code` in the PATH
+    On Windows, shutil.which misses extensionless scripts -- `code` in the PATH
     is actually `code.cmd` (a batch wrapper). Try .cmd variants first, then
     fall back to fully-qualified paths for the standard VS Code install.
     """
@@ -692,12 +711,12 @@ def install_vscode_extension(check_only: bool = False) -> bool:
     """
     vsix = get_bundled_vsix()
     if not vsix.exists():
-        print(f"  WARNING: Bundled .vsix not found at {vsix} — skipping")
+        print(f"  WARNING: Bundled .vsix not found at {vsix} -- skipping")
         return False
 
     code_bin = _find_code_binary()
     if not code_bin:
-        print("  WARNING: `code` CLI not found in PATH — skipping extension install")
+        print("  WARNING: `code` CLI not found in PATH -- skipping extension install")
         print(f"  Manual install: code --install-extension \"{vsix}\" --force")
         return False
 
@@ -730,7 +749,7 @@ def install_vscode_extension(check_only: bool = False) -> bool:
             print(f"    stderr: {result.stderr.strip()}")
         return False
     except subprocess.TimeoutExpired:
-        print(f"  WARNING: Extension install timed out — try manually:")
+        print(f"  WARNING: Extension install timed out -- try manually:")
         print(f"    code --install-extension \"{vsix}\" --force")
         return False
     except Exception as e:
@@ -753,13 +772,13 @@ def run_setup(
     """Run the full post-install setup.
 
     Steps (normal mode):
-      0. Stop daemon  — kill any running jama-connect process
-      1. Repair       — clean corrupted/stale dist-info entries
-      2. MCP symlink  — ~/.devin/mcp-servers/jama-connect
-      3. Patch JS     — overwrite out/ in all installed extension dirs
-      4. Devin ext    — extract vsix to ~/.devin/extensions/
-      5. VS Code ext  — code --install-extension
-      6. Start daemon — launch jama-rest in background
+      0. Stop daemon  -- kill any running jama-connect process
+      1. Repair       -- clean corrupted/stale dist-info entries
+      2. MCP symlink  -- ~/.devin/mcp-servers/jama-connect
+      3. Patch JS     -- overwrite out/ in all installed extension dirs
+      4. Devin ext    -- extract vsix to ~/.devin/extensions/
+      5. VS Code ext  -- code --install-extension
+      6. Start daemon -- launch jama-rest in background
     """
     pkg_version = importlib.metadata.version("jama-connect")
     print(f"=== jama-connect post-install setup (v{pkg_version}) ===")
@@ -778,7 +797,7 @@ def run_setup(
     repair_installation(check_only=check_only)
 
     if repair_only:
-        print("\nRepair-only mode — done.")
+        print("\nRepair-only mode -- done.")
         return
 
     # --- Step 2: MCP symlink ---
@@ -787,27 +806,27 @@ def run_setup(
 
     # --- Steps 3-5: Extensions ---
     if not skip_extension:
-        print("\n[3/6] Patch extension JS (fast update → all installed hosts)")
+        print("\n[3/6] Patch extension JS (fast update -> all installed hosts)")
         patch_extension_out(check_only=check_only)
 
-        print("\n[4/6] Devin extension (vsix extraction → ~/.devin/extensions/)")
+        print("\n[4/6] Devin extension (vsix extraction -> ~/.devin/extensions/)")
         install_devin_extension(check_only=check_only)
 
         print("\n[5/6] VS Code extension (code --install-extension)")
         install_vscode_extension(check_only=check_only)
     else:
-        print("\n[3/6] Extension patch  — skipped (--skip-extension)")
-        print("\n[4/6] Devin extension  — skipped (--skip-extension)")
-        print("\n[5/6] VS Code extension — skipped (--skip-extension)")
+        print("\n[3/6] Extension patch  -- skipped (--skip-extension)")
+        print("\n[4/6] Devin extension  -- skipped (--skip-extension)")
+        print("\n[5/6] VS Code extension -- skipped (--skip-extension)")
 
     # --- Step 6: Start daemon ---
     if not check_only and not no_start:
         print("\n[6/6] Start backend daemon")
         start_backend(port=port)
     elif check_only:
-        print("\n[6/6] Start daemon — skipped (check mode)")
+        print("\n[6/6] Start daemon -- skipped (check mode)")
     else:
-        print("\n[6/6] Start daemon — skipped (--no-start)")
+        print("\n[6/6] Start daemon -- skipped (--no-start)")
 
     if not check_only:
         print("\nDone. Reload VS Code / Devin window to activate the extension.")

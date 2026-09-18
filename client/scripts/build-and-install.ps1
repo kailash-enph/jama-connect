@@ -204,7 +204,11 @@ try {
 # Step 7: pip install
 # ---------------------------------------------------------------------------
 Step 7 "pip install --force-reinstall"
-uv pip install --force-reinstall $wheel.FullName
+# --no-deps: jama-connect is pure Python; dependencies (pydantic-core etc.) are
+# already installed and their native .pyd files may be locked by Windsurf/other
+# processes. Re-installing only the jama-connect wheel is safe and avoids the
+# "Access is denied" error on locked .pyd files.
+uv pip install --system --no-deps --force-reinstall $wheel.FullName
 if ($LASTEXITCODE -ne 0) { Fail "pip install failed (exit $LASTEXITCODE)" }
 Ok "jama-connect $($wheel.Name -replace '.*-(\d+\.\d+\.\d+)-.*','$1') installed."
 
