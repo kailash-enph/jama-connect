@@ -2,7 +2,7 @@
 
 Unified Jama Connect package — MCP server + REST API + web viewer + VS Code extension.
 
-**Version:** 0.5.0 | **Repo:** [github.com/kailash-enph/jama-connect](https://github.com/kailash-enph/jama-connect)
+**Version:** 0.5.5 | **Repo:** [github.com/kailash-enph/jama-connect](https://github.com/kailash-enph/jama-connect)
 
 ## Features
 
@@ -18,19 +18,30 @@ Unified Jama Connect package — MCP server + REST API + web viewer + VS Code ex
 
 ## Installation
 
+### End-user (from PyPI or wheel)
+
 ```bash
 pip install jama-connect
+
+# Then activate — installs extensions + starts daemon:
+jama-post-install
 ```
 
-Or from wheel:
-```bash
-pip install dist/jama_connect-0.5.0-py3-none-any.whl
+### Developer (full build from source)
+
+```powershell
+# One command: compile extension → run tests → build wheel → pip install
+.\client\scripts\build-and-install.ps1
+
+# Script prints this at the end — copy and run:
+jama-post-install
 ```
 
-### Post-Install
-
-```bash
-jama-post-install          # Creates symlink in ~/.devin/mcp-servers/
+`build-and-install.ps1` options:
+```powershell
+-SkipVsix    # Skip vsce packaging (faster when only JS changed)
+-SkipTests   # Skip extension + Python tests
+-Port N      # Backend port to stop (default: 8765)
 ```
 
 ## CLI Commands
@@ -38,38 +49,55 @@ jama-post-install          # Creates symlink in ~/.devin/mcp-servers/
 | Command | What it does |
 |---|---|
 | `jama-connect` | MCP server (stdio) for Windsurf/Devin |
-| `jama-connect --daemon` | MCP + REST API in one process (recommended) |
-| `jama-rest` | REST API + web viewer standalone |
-| `jama-editor` | Install VS Code extension |
-| `jama-post-install` | Create symlink in `~/.devin/mcp-servers/` |
+| `jama-rest` | REST API + web viewer (always-on daemon) |
+| `jama-post-install` | Stop daemon → install extensions → start daemon |
+| `jama-post-install --check` | Check install status without making changes |
+| `jama-post-install --no-start` | Install extensions but skip daemon start |
 
 ## Running
 
-### Daemon Mode (recommended for Devin/Windsurf)
+### Backend (always-on)
 
-Starts both MCP (stdio) and REST API (port 8765) in one process:
-
-```bash
-jama-connect --daemon
-```
-
-This is what `mcp_config.json` uses — no separate `jama-rest` terminal needed.
-
-### REST API Only
+`jama-rest` is the primary process. It serves the REST API, web viewer, MCP
+server (background thread), and SSE event bus — all on port 8765.
 
 ```bash
-jama-rest
+jama-rest                  # starts and stays running
 ```
 
 Open http://localhost:8765/viewer in your browser.
 
-### VS Code Extension
+`jama-post-install` starts it automatically. To start it again after a reboot:
 
 ```bash
-jama-editor                # Installs bundled VSIX to VS Code
+jama-rest
+# or re-run jama-post-install
 ```
 
-Then open VS Code → Jama Editor sidebar. Requires `jama-rest` or `jama-connect --daemon` running.
+### MCP for Windsurf/Devin
+
+Add to `mcp_config.json` and point at the running `jama-rest` — no separate
+MCP process needed:
+
+```json
+{
+  "mcpServers": {
+    "jama-mcp-v2": {
+      "command": "jama-connect",
+      "args": []
+    }
+  }
+}
+```
+
+### Active Project
+
+All three clients (VS Code extension, web viewer, MCP/AI) share **one active
+project**. Change it in any one place and all views update instantly via SSE:
+
+- **VS Code** → Settings panel → Project dropdown
+- **Web Viewer** → Project dropdown (top of tree page)
+- **AI/MCP** → `jama_set_active_project(project_id=20570)`
 
 ## First-Run Cache Seed
 
@@ -145,17 +173,30 @@ uv sync                            # install Python deps
 cd viewer && npm ci                # install viewer deps
 ```
 
-### Build
-```bash
-.\build-package.ps1                # Windows (viewer + extension + wheel)
-./build-package.sh                 # macOS/Linux
-uv build                           # wheel only
+### Build & Install (one command)
+```powershell
+# Full build: extension JS + tests + vsix + wheel + pip install
+.\client\scripts\build-and-install.ps1
+
+# Then activate on this machine:
+jama-post-install
 ```
 
-### Test
+Flags: `-SkipVsix` (no vsce), `-SkipTests` (no tests), `-Port N`
+
+### Build steps individually
 ```bash
-uv run pytest tests/ -v            # Python tests
-cd vscode-extension && npm test    # TypeScript tests
+# Extension JS only
+cd client/vscode-extension && node esbuild.mjs
+
+# Python wheel only
+cd client/backend && uv build
+
+# Extension tests
+cd client/vscode-extension && npm test
+
+# Python tests
+cd client/backend && uv run pytest tests/ -v
 ```
 
 ### Publish
@@ -166,29 +207,34 @@ twine upload --repository-url http://nz-lnx-01/pypi dist/*
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│         jama-connect (single process)            │
-│                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌───────────┐      │
-│  │ MCP stdio│  │ REST API │  │  Static   │      │
-│  │ (tools)  │  │ /api/*   │  │  Viewer   │      │
-│  │          │  │ /editor/*│  │  /viewer  │      │
-│  └──────────┘  └──────────┘  └───────────┘      │
-│              ↕                                   │
-│     ┌──────────────────────┐                     │
-│     │  SQLite cache.db     │                     │
-│     │  (FTS5, schema v3)   │                     │
-│     │  + editor_db.sqlite  │                     │
-│     └──────────────────────┘                     │
-│              ↕                                   │
-│     ┌──────────────────────┐                     │
-│     │  Jama Cloud API      │                     │
-│     │  (OAuth2 + httpx)    │                     │
-│     └──────────────────────┘                     │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  jama-rest  (always-on — started by jama-post-install)   │
+│                                                          │
+│  main thread: Uvicorn :8765                              │
+│    /api/*        REST endpoints (ProjectDb)              │
+│    /viewer/      Next.js static web viewer               │
+│    /api/events   SSE push — active_project_changed       │
+│    /settings/*   credentials, project selection          │
+│                                                          │
+│  background thread: MCP stdio (when AI connects)         │
+│    ~40 jama_* tools — uses same ProjectDb/SearchEngine   │
+│    exits when AI disconnects; REST stays up              │
+│                                                          │
+│  shared: ServiceRegistry                                 │
+│    CacheManager  → projects/{id}.db  (per-project data)  │
+│    SearchEngine  → active project FTS5                   │
+│    JamaCache     → cache.db (edit write buffer only)     │
+│    JamaApiClient → OAuth2 REST                           │
+└──────────────────────────────────────────────────────────┘
+       │ HTTP :8765              │ HTTP :8765       │ stdio
+       ▼                         ▼                  ▼
+ VS Code Extension         Web Viewer          Windsurf/Devin
+ (tree + item editor)      (Next.js SPA)       (MCP tools)
 
-Daemon mode: MCP stdio (main thread) + REST API (background thread)
-             → one process, shared cache, shared API client
+Active project changed in any client
+  → POST /settings/project/select
+  → SSE broadcast: active_project_changed
+  → all tree views reload automatically
 ```
 
 ## Files

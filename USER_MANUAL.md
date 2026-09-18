@@ -1,6 +1,6 @@
 # Jama Connect User Manual
 
-> **Version:** 0.5.0 | **Package:** jama-connect | **Author:** Enphase Energy — Hardware Engineering AI Tools
+> **Version:** 0.5.5 | **Package:** jama-connect | **Author:** Enphase Energy — Hardware Engineering AI Tools
 
 ---
 
@@ -70,36 +70,85 @@
 - **pip** package manager
 - **Jama Connect account** with OAuth2 credentials (see [Configuration](#configuration))
 
-### Install from PyPI
+### Install from PyPI (end users)
 
 ```bash
 pip install jama-connect
 ```
 
-### Install from Wheel
-
-If you have a local wheel file (e.g., from the Enphase bundle):
-
-```bash
-pip install dist/jama_connect-0.5.0-py3-none-any.whl
-```
-
-### Post-Install Setup
-
-Create a symlink/junction in your IDE's MCP servers directory:
+pip does not have a post-install hook mechanism, so after `pip install`
+completes you must run the activation step manually:
 
 ```bash
 jama-post-install
 ```
 
-This creates:
-- **Windows:** `%USERPROFILE%\.devin\mcp-servers\jama-connect` (junction)
-- **macOS/Linux:** `~/.devin/mcp-servers/jama-connect` (symlink)
+### Install from Wheel (end users)
 
-Verify the symlink:
+If you have a local `.whl` file:
 
 ```bash
-jama-post-install --check
+pip install jama_connect-0.5.5-py3-none-any.whl
+jama-post-install
+```
+
+### Developer Install (build from source)
+
+Use the provided script — it compiles, tests, packages, and installs in one step:
+
+```powershell
+# From the repository root:
+.\client\scripts\build-and-install.ps1
+```
+
+The script prints the following at the end — copy and run it:
+
+```
+======================================================
+  BUILD + INSTALL COMPLETE
+======================================================
+
+  Now run the post-install step:
+
+      jama-post-install
+```
+
+**Script options:**
+| Flag | Effect |
+|------|--------|
+| `-SkipVsix` | Skip `vsce package` (faster when only JS changed) |
+| `-SkipTests` | Skip vitest + pytest |
+| `-Port N` | Backend port to stop before installing (default: 8765) |
+
+### Post-Install Setup (`jama-post-install`)
+
+Run once after every `pip install` (user) or `build-and-install.ps1` (developer):
+
+```bash
+jama-post-install
+```
+
+**What it does (6 steps):**
+
+| Step | Action |
+|------|--------|
+| 0 | **Stop daemon** — graceful REST shutdown, force-kill if needed |
+| 1 | **Repair** — remove corrupted/stale `dist-info` entries |
+| 2 | **MCP symlink** — `~/.devin/mcp-servers/jama-connect` → site-packages |
+| 3 | **Patch JS** — overwrite `out/` in all installed extension directories |
+| 4 | **Devin extension** — extract bundled `.vsix` → `~/.devin/extensions/` |
+| 5 | **VS Code extension** — `code --install-extension` (targets `~/.vscode/extensions/`) |
+| 6 | **Start daemon** — launch `jama-rest` detached; waits for `/api/health` |
+
+After step 6 completes, reload your VS Code / Devin window to activate the new extension:
+- **VS Code / Devin:** `Ctrl+Shift+P` → `Developer: Reload Window`
+
+**Flags:**
+```bash
+jama-post-install --check        # verify all steps, make no changes
+jama-post-install --no-start     # install extensions but skip daemon start
+jama-post-install --port 9000    # use a different REST port
+jama-post-install --repair-only  # only clean up corrupted dist-info entries
 ```
 
 ---
@@ -453,62 +502,77 @@ JAMA_REST_PORT=9000 jama-rest
 
 ---
 
-### `jama-editor`
+### `jama-rest`
 
-**Description:** Install the Jama Editor VS Code extension
+**Description:** Start the REST API + web viewer + MCP background thread.
+This is the main daemon — keep it running at all times.
 
 **Usage:**
 ```bash
-jama-editor
+jama-rest [--port N]
 ```
 
-**What it does:**
-1. Finds the bundled VSIX file (`jama-editor-*.vsix`)
-2. Installs it to VS Code via `code --install-extension`
-
-**Examples:**
-```bash
-# Install extension
-jama-editor
-
-# Verify installation
-code --list-extensions | grep jama
-```
+**What it serves:**
+- `http://localhost:8765/api/*` — REST API (items, search, sync, settings)
+- `http://localhost:8765/viewer/` — Web viewer (Next.js static build)
+- `http://localhost:8765/api/events` — SSE push channel (active project changes)
+- `http://localhost:8765/docs` — Swagger UI
 
 **When to use:**
-- Run once after installing jama-connect
-- Re-run if you update jama-connect and the extension version changes
+- `jama-post-install` starts it automatically — you rarely need to call this directly
+- Re-run if the daemon crashes or was stopped manually
 
 ---
 
 ### `jama-post-install`
 
-**Description:** Create symlink/junction in `~/.devin/mcp-servers/`
+**Description:** Full post-install activation — stops any running daemon, installs
+extensions into VS Code and Devin, then starts the backend.
+
+> **Run this after every `pip install jama-connect` or `build-and-install.ps1`.**
+> pip itself cannot run post-install scripts; this command must be invoked manually.
+> The build script prints a reminder with the exact command.
 
 **Usage:**
 ```bash
-jama-post-install [--check]
+jama-post-install [options]
 ```
 
 **Options:**
-- `--check` — Verify symlink exists (don't create)
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Verify all steps, make no changes |
+| `--no-start` | Install extensions but skip starting the daemon |
+| `--port N` | REST API port to stop/start (default: 8765) |
+| `--repair-only` | Only clean up corrupted/stale dist-info entries |
+| `--skip-extension` | Skip extension install steps (symlink + repair only) |
 
 **Examples:**
 ```bash
-# Create symlink
+# Standard use — run after pip install
 jama-post-install
 
-# Verify symlink
+# Verify everything is in order
 jama-post-install --check
+
+# CI / headless — install files only, don't start daemon
+jama-post-install --no-start
+
+# Custom port
+jama-post-install --port 9000
 ```
 
-**When to use:**
-- Run once after installing jama-connect
-- Re-run if you move the package or change Python environments
+**Extension install locations:**
+
+| Host | Directory |
+|------|-----------|
+| Devin | `~/.devin/extensions/enphase.jama-editor-<version>/` |
+| VS Code | `~/.vscode/extensions/enphase.jama-editor-<version>/` |
 
 **Windows notes:**
-- Requires Developer Mode or admin privileges for symlinks
-- Falls back to junction (no admin needed) if symlink fails
+- MCP symlink requires Developer Mode or admin privileges; falls back to junction automatically
+- Daemon kill uses graceful REST shutdown first, then `wmic` force-kill if needed
 
 ---
 
